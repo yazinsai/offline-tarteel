@@ -13,6 +13,7 @@ function App() {
   const { status, start, stop, ws } = useAudioStream(WS_URL);
   const [current, setCurrent] = useState<VerseState | null>(null);
   const [completed, setCompleted] = useState<CompletedVerse[]>([]);
+  const [serverStatus, setServerStatus] = useState<string>("idle");
 
   const handleMessage = useCallback((e: MessageEvent) => {
     try {
@@ -21,6 +22,12 @@ function App() {
         setCurrent(msg.current ?? null);
         if (msg.completed) {
           setCompleted(msg.completed);
+        }
+        setServerStatus("tracking");
+      } else if (msg.type === "status") {
+        setServerStatus(msg.status ?? "listening");
+        if (msg.status === "silence") {
+          // Don't clear current verse during silence — keep showing it
         }
       }
     } catch {
@@ -42,6 +49,7 @@ function App() {
     stop();
     setCurrent(null);
     setCompleted([]);
+    setServerStatus("idle");
   }, [stop]);
 
   const isStreaming = status === "streaming";
@@ -52,10 +60,17 @@ function App() {
         <div className="header-left">
           <span className="title">Tarteel</span>
           <span
-            className={`status-dot ${isStreaming ? "active" : ""}`}
+            className={`status-dot ${isStreaming ? (serverStatus === "silence" ? "silence" : "active") : ""}`}
           />
         </div>
-        {isStreaming && <span className="status-label">Live</span>}
+        {isStreaming && (
+          <span className={`status-label ${serverStatus === "tracking" ? "tracking" : ""}`}>
+            {serverStatus === "silence" && "Silence"}
+            {serverStatus === "listening" && "Listening"}
+            {serverStatus === "tracking" && "Tracking"}
+            {serverStatus === "idle" && "Starting"}
+          </span>
+        )}
       </header>
 
       {status === "idle" && (
@@ -91,13 +106,15 @@ function App() {
           {current ? (
             <CurrentVerse verse={current} />
           ) : (
-            <div className="listening-state">
+            <div className={`listening-state ${serverStatus === "silence" ? "is-silence" : ""}`}>
               <div className="listening-rings">
                 <div className="listening-ring" />
                 <div className="listening-ring" />
                 <div className="listening-ring" />
               </div>
-              <span className="listening-label">Listening</span>
+              <span className="listening-label">
+                {serverStatus === "silence" ? "Silence" : "Listening"}
+              </span>
             </div>
           )}
 

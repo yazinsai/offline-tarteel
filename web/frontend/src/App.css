@@ -61,11 +61,21 @@
   box-shadow: 0 0 8px rgba(74, 222, 128, 0.5), 0 0 20px rgba(74, 222, 128, 0.2);
 }
 
+.status-dot.silence {
+  background: #f59e0b;
+  box-shadow: 0 0 6px rgba(245, 158, 11, 0.3);
+}
+
 .status-label {
   font-size: 0.7rem;
   text-transform: uppercase;
   letter-spacing: 0.12em;
   color: #666;
+  transition: color 0.3s ease;
+}
+
+.status-label.tracking {
+  color: #4ade80;
 }
 
 /* ── Start screen ── */
@@ -162,6 +172,18 @@
   text-transform: uppercase;
   letter-spacing: 0.18em;
   color: #555;
+  transition: color 0.3s ease;
+}
+
+/* Silence state: slow down rings, dim everything */
+.listening-state.is-silence .listening-ring {
+  border-color: rgba(245, 158, 11, 0.1);
+  animation-duration: 4s;
+}
+
+.listening-state.is-silence .listening-label {
+  color: #f59e0b;
+  opacity: 0.5;
 }
 
 /* ── Current verse ── */
