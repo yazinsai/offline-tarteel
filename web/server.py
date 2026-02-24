@@ -6,9 +6,9 @@ transcribes it with mlx-whisper, and tracks verse position.
 """
 
 import asyncio
-import json
 import logging
 import sys
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import numpy as np
@@ -123,14 +123,15 @@ def _completed_entry(match) -> dict:
 # ---------------------------------------------------------------------------
 # FastAPI app
 # ---------------------------------------------------------------------------
-app = FastAPI(title="Offline Tarteel", docs_url=None, redoc_url=None)
-
-
-@app.on_event("startup")
-async def _startup():
+@asynccontextmanager
+async def lifespan(application: FastAPI):
     global quran_db
     quran_db = QuranDB()
     log.info("QuranDB loaded: %d verses", quran_db.total_verses)
+    yield
+
+
+app = FastAPI(title="Offline Tarteel", docs_url=None, redoc_url=None, lifespan=lifespan)
 
 
 @app.websocket("/ws")
