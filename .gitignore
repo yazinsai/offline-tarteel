@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+dist/
+build/
+data/lora-adapter-small/
+data/test_audio/
+data/training/
+*.m4a
+*.wav
