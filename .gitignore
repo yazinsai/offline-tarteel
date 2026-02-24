@@ -9,3 +9,4 @@ data/test_audio/
 data/training/
 *.m4a
 *.wav
+node_modules/
