@@ -36,9 +36,10 @@ CHUNK_SECONDS = 3.0
 CHUNK_SAMPLES = int(SAMPLE_RATE * CHUNK_SECONDS)  # 48000
 BASE_MODEL = "openai/whisper-small"
 LORA_ADAPTER = str(PROJECT_ROOT / "data" / "lora-adapter-small")
-CONFIDENCE_DISPLAY_THRESHOLD = 0.4
-ADVANCE_COVERAGE_THRESHOLD = 0.90
+CONFIDENCE_DISPLAY_THRESHOLD = 0.6
+ADVANCE_COVERAGE_THRESHOLD = 0.85
 ADVANCE_CONFIDENCE_THRESHOLD = 0.6
+MIN_WORDS_FOR_MATCH = 2  # don't show matches until we have at least this many words
 SILENCE_RMS_THRESHOLD = 0.005
 PORT = 8765
 
@@ -180,6 +181,8 @@ async def websocket_endpoint(ws: WebSocket):
     completed: list[dict] = []
     audio_buffer = np.empty(0, dtype=np.float32)
     last_status: str | None = None
+    last_sent_match: dict | None = None  # keep showing last good match
+    words_since_reset = 0  # track words accumulated since last reset
 
     async def send_status(status: str):
         nonlocal last_status
@@ -187,10 +190,13 @@ async def websocket_endpoint(ws: WebSocket):
             await ws.send_json({"type": "status", "status": status})
             last_status = status
 
-    async def send_verse_update(match):
+    async def send_verse_update(current_dict: dict | None):
+        nonlocal last_sent_match
+        if current_dict:
+            last_sent_match = current_dict
         payload = {
             "type": "verse_update",
-            "current": _verse_match_to_dict(match),
+            "current": current_dict or last_sent_match,
             "completed": list(completed),
         }
         await ws.send_json(payload)
@@ -224,11 +230,27 @@ async def websocket_endpoint(ws: WebSocket):
                     continue
 
                 words = text.split()
-                log.info("Transcribed %d words: %s", len(words), text[:80])
+                words_since_reset += len(words)
+                log.info("Transcribed %d words: %s", len(words), text[:120])
 
                 # Feed words into the verse tracker
                 match = tracker.update(words)
                 if match is None:
+                    log.info("No match found")
+                    continue
+
+                log.info(
+                    "Match: %s %d:%d conf=%.3f pos=%d/%d words_since_reset=%d accumulated='%s'",
+                    match.surah_name_en, match.surah, match.ayah,
+                    match.confidence, match.word_position, match.total_words,
+                    words_since_reset,
+                    tracker.accumulated_text[:100],
+                )
+
+                # Don't show matches until we have enough accumulated words
+                # (prevents garbage matches on fragments after reset)
+                if words_since_reset < MIN_WORDS_FOR_MATCH:
+                    log.info("Skipping — not enough words yet (%d < %d)", words_since_reset, MIN_WORDS_FOR_MATCH)
                     continue
 
                 # Below display threshold — skip sending
@@ -247,13 +269,14 @@ async def websocket_endpoint(ws: WebSocket):
                         coverage * 100, match.confidence,
                     )
                     completed.append(_completed_entry(match))
-                    # Send final update for this verse before resetting
-                    await send_verse_update(match)
+                    await send_verse_update(_verse_match_to_dict(match))
                     # Reset tracker for the next verse
                     tracker.reset()
+                    words_since_reset = 0
+                    last_sent_match = None
                     continue
 
-                await send_verse_update(match)
+                await send_verse_update(_verse_match_to_dict(match))
 
     except WebSocketDisconnect:
         log.info("WebSocket disconnected: %s", ws.client)

@@ -22,7 +22,7 @@ export function CurrentVerse({ verse }: Props) {
 
       <div className="verse-words" dir="rtl" lang="ar">
         {verse.words.map((word, i) => {
-          const isMatched = verse.matched_indices.includes(i);
+          const isMatched = i < verse.word_position;
           return (
             <span
               key={`${verse.surah}-${verse.ayah}-${i}`}
