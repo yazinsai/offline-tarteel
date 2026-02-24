@@ -2,7 +2,8 @@
 WebSocket backend for real-time Quran recitation tracking.
 
 Accepts binary 16kHz mono Float32 PCM audio from the browser,
-transcribes it with mlx-whisper, and tracks verse position.
+transcribes it with the LoRA-finetuned Whisper model, and tracks
+verse position.
 """
 
 import asyncio
@@ -12,6 +13,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 import numpy as np
+import torch
 import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
@@ -32,7 +34,8 @@ from verse_position_tracker import VersePositionTracker
 SAMPLE_RATE = 16000
 CHUNK_SECONDS = 3.0
 CHUNK_SAMPLES = int(SAMPLE_RATE * CHUNK_SECONDS)  # 48000
-MLX_MODEL = "mlx-community/whisper-base-mlx"
+BASE_MODEL = "openai/whisper-small"
+LORA_ADAPTER = str(PROJECT_ROOT / "data" / "lora-adapter-small")
 CONFIDENCE_DISPLAY_THRESHOLD = 0.4
 ADVANCE_COVERAGE_THRESHOLD = 0.90
 ADVANCE_CONFIDENCE_THRESHOLD = 0.6
@@ -52,31 +55,65 @@ log = logging.getLogger("tarteel-ws")
 # Globals (loaded once at startup)
 # ---------------------------------------------------------------------------
 quran_db: QuranDB | None = None
-mlx_whisper_module = None  # lazy-loaded on first transcription
+whisper_model = None
+whisper_processor = None
+device = None
 
 
-def _ensure_model():
-    """Lazy-load mlx_whisper on first use (triggers model download if needed)."""
-    global mlx_whisper_module
-    if mlx_whisper_module is None:
-        import mlx_whisper
-        mlx_whisper_module = mlx_whisper
-        log.info("mlx-whisper model loaded: %s", MLX_MODEL)
+def _load_model():
+    """Load whisper-small + LoRA adapter for Quran transcription."""
+    global whisper_model, whisper_processor, device
+    if whisper_model is not None:
+        return
+
+    from transformers import WhisperProcessor, WhisperForConditionalGeneration
+    from peft import PeftModel
+
+    # Use MPS on Apple Silicon, CUDA if available, else CPU
+    if torch.backends.mps.is_available():
+        device = torch.device("mps")
+    elif torch.cuda.is_available():
+        device = torch.device("cuda")
+    else:
+        device = torch.device("cpu")
+
+    log.info("Loading whisper-small + LoRA adapter on %s...", device)
+    whisper_processor = WhisperProcessor.from_pretrained(
+        BASE_MODEL, language="arabic", task="transcribe"
+    )
+    base = WhisperForConditionalGeneration.from_pretrained(BASE_MODEL)
+    whisper_model = PeftModel.from_pretrained(base, LORA_ADAPTER)
+    whisper_model = whisper_model.to(device)
+    whisper_model.eval()
+    log.info("Model loaded: %s + %s", BASE_MODEL, LORA_ADAPTER)
 
 
 def _transcribe(audio: np.ndarray) -> str:
-    """Transcribe a Float32 audio array and return the text."""
-    _ensure_model()
-    result = mlx_whisper_module.transcribe(
-        audio,
-        path_or_hf_repo=MLX_MODEL,
-        language="ar",
-        word_timestamps=False,
-        condition_on_previous_text=False,
-        hallucination_silence_threshold=1.0,
-        no_speech_threshold=0.5,
+    """Transcribe a Float32 audio array using the finetuned model."""
+    _load_model()
+
+    # Pad short chunks to at least 1 second
+    if len(audio) < SAMPLE_RATE:
+        audio = np.pad(audio, (0, SAMPLE_RATE - len(audio)))
+
+    inputs = whisper_processor(
+        audio, sampling_rate=SAMPLE_RATE, return_tensors="pt"
     )
-    text = result.get("text", "").strip()
+    input_features = inputs.input_features.to(device)
+
+    with torch.no_grad():
+        predicted_ids = whisper_model.generate(
+            input_features,
+            max_new_tokens=225,
+            repetition_penalty=1.2,
+            language="ar",
+            task="transcribe",
+        )
+
+    text = whisper_processor.batch_decode(
+        predicted_ids, skip_special_tokens=True
+    )[0].strip()
+
     # Filter hallucinations: excessive repetition or very long output
     words = text.split()
     if len(words) >= 3:
