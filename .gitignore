@@ -4,9 +4,20 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+data/lora-adapter/
 data/lora-adapter-small/
+data/lora-checkpoints/
+data/reference_audio/
 data/test_audio/
+data/train_subset/
 data/training/
+data/*.log
 *.m4a
 *.wav
 node_modules/
+
+# Experiment artifacts
+experiments/contrastive/checkpoints/
+experiments/contrastive/logs/
+experiments/embedding-search/audio_corpus/
+experiments/embedding-search/indices/
