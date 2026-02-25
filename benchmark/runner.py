@@ -125,8 +125,19 @@ def discover_experiments(filter_name: str | None = None) -> list[dict]:
     return experiments
 
 
-def run_experiment(exp: dict, samples: list[dict], pipeline: StreamingPipeline) -> dict | None:
-    """Run one experiment against all samples using streaming evaluation."""
+def run_experiment(
+    exp: dict,
+    samples: list[dict],
+    pipeline: StreamingPipeline,
+    mode: str = "full",
+    chunk_seconds: float = 3.0,
+) -> dict | None:
+    """Run one experiment against all samples using streaming evaluation.
+
+    Args:
+        mode: "full" for whole-file transcription, "streaming" for chunked.
+        chunk_seconds: Chunk duration for streaming mode.
+    """
     mod = _load_module(exp["name"].replace("/", "_").replace("-", "_"), exp["run_path"])
 
     if not hasattr(mod, "transcribe"):
@@ -167,7 +178,12 @@ def run_experiment(exp: dict, samples: list[dict], pipeline: StreamingPipeline) 
 
         try:
             start = time.perf_counter()
-            emissions = pipeline.run_on_full_transcript(audio_path, transcribe_fn)
+            if mode == "streaming":
+                emissions = pipeline.run_on_audio_chunked(
+                    audio_path, transcribe_fn, chunk_seconds=chunk_seconds,
+                )
+            else:
+                emissions = pipeline.run_on_full_transcript(audio_path, transcribe_fn)
             elapsed = time.perf_counter() - start
         except Exception as e:
             print(f"  Error on {sample['id']}: {e}")
@@ -193,8 +209,10 @@ def run_experiment(exp: dict, samples: list[dict], pipeline: StreamingPipeline) 
     n = len(samples)
     avg_latency = sum(latencies) / n if n else 0
 
+    exp_name = exp["name"] if mode == "full" else f"{exp['name']} (stream {chunk_seconds:.0f}s)"
+
     return {
-        "name": exp["name"],
+        "name": exp_name,
         "recall": total_recall / n if n else 0,
         "precision": total_precision / n if n else 0,
         "sequence_accuracy": total_seq_acc / n if n else 0,
@@ -267,6 +285,10 @@ def main():
     parser = argparse.ArgumentParser(description="Benchmark all experiments (streaming)")
     parser.add_argument("--experiment", type=str, help="Run only this experiment")
     parser.add_argument("--category", type=str, help="Filter samples by category")
+    parser.add_argument("--mode", type=str, default="full", choices=["full", "streaming"],
+                        help="full = transcribe whole file; streaming = chunked audio")
+    parser.add_argument("--chunk", type=float, default=3.0,
+                        help="Chunk duration in seconds for streaming mode (default: 3.0)")
     args = parser.parse_args()
 
     samples = load_manifest()
@@ -282,12 +304,13 @@ def main():
     db = QuranDB()
     pipeline = StreamingPipeline(db=db)
 
-    print(f"Running {len(experiments)} experiment(s) on {len(samples)} sample(s)...")
+    mode_label = f"streaming ({args.chunk:.0f}s chunks)" if args.mode == "streaming" else "full transcript"
+    print(f"Running {len(experiments)} experiment(s) on {len(samples)} sample(s) [{mode_label}]...")
 
     results = []
     for exp in experiments:
         print(f"\n>>> {exp['name']}")
-        result = run_experiment(exp, samples, pipeline)
+        result = run_experiment(exp, samples, pipeline, mode=args.mode, chunk_seconds=args.chunk)
         if result is None:
             continue
         results.append(result)

@@ -82,11 +82,18 @@ class VerseTracker:
             return best
         return None
 
-    def _emit(self, match: dict) -> dict:
-        """Emit a verse detection and reset state."""
+    def _emit(self, match: dict) -> dict | None:
+        """Emit a verse detection and reset state. Returns None if duplicate."""
+        ref = (match["surah"], match["ayah"])
+        if ref == self._last_emitted:
+            # Same verse as last emission — skip duplicate, just reset tracking
+            self._current_match = None
+            self._peak_score = 0.0
+            return None
+
         emission = {"surah": match["surah"], "ayah": match["ayah"], "score": match["score"]}
         self._emissions.append(emission)
-        self._last_emitted = (match["surah"], match["ayah"])
+        self._last_emitted = ref
 
         # Trim accumulated text: remove the portion that matched
         matched_words = match["text_clean"].split()
@@ -107,13 +114,12 @@ class VerseTracker:
         verse_words = match["text_clean"].split()
 
         if len(acc_words) > len(verse_words) * OVERFLOW_RATIO and len(verse_words) > 0:
-            # Text is significantly longer than the best-matched verse.
-            # Emit the match and try to match the remainder.
-            emissions.append(self._emit(match))
+            e = self._emit(match)
+            if e:
+                emissions.append(e)
             if self._accumulated.strip():
                 next_match = self._find_best_match(self._accumulated)
                 if next_match:
-                    # Recursively check if the remainder also overflows
                     more = self._try_split_and_emit(next_match)
                     if more:
                         emissions.extend(more)
@@ -123,20 +129,8 @@ class VerseTracker:
 
         return emissions
 
-    def process_text(self, text: str) -> list[dict]:
-        """Process new text, return any verse emissions.
-
-        Args:
-            text: The full accumulated transcript so far (not a delta).
-
-        Returns:
-            List of emitted verses [{"surah": int, "ayah": int, "score": float}]
-        """
-        normalized = normalize_arabic(text)
-        if not normalized.strip():
-            return []
-
-        self._accumulated = normalized
+    def _evaluate(self) -> list[dict]:
+        """Core evaluation logic — find matches and emit completed verses."""
         emissions = []
 
         match = self._find_best_match(self._accumulated)
@@ -150,13 +144,12 @@ class VerseTracker:
         )
 
         if same_verse:
-            # Same verse — update peak score
             if match["score"] > self._peak_score:
                 self._peak_score = match["score"]
             elif self._peak_score - match["score"] > SCORE_DROP_THRESHOLD:
-                # Score dropped — verse is likely complete, emit it
-                emissions.append(self._emit(self._current_match))
-                # Try to match remainder
+                e = self._emit(self._current_match)
+                if e:
+                    emissions.append(e)
                 if self._accumulated.strip():
                     next_match = self._find_best_match(self._accumulated)
                     if next_match:
@@ -168,11 +161,10 @@ class VerseTracker:
             else:
                 self._current_match = match
         else:
-            # Different verse detected
             if self._current_match and self._current_match["score"] >= MIN_EMIT_SCORE:
-                # Emit the previous verse
-                emissions.append(self._emit(self._current_match))
-            # Start tracking the new verse
+                e = self._emit(self._current_match)
+                if e:
+                    emissions.append(e)
             self._current_match = match
             self._peak_score = match["score"]
 
@@ -180,7 +172,6 @@ class VerseTracker:
             self._current_match = match
             self._peak_score = match["score"]
 
-        # Check if accumulated text overflows the current match — if so, split
         if self._current_match and not emissions:
             split_emissions = self._try_split_and_emit(self._current_match)
             if split_emissions:
@@ -188,8 +179,50 @@ class VerseTracker:
 
         return emissions
 
+    def process_text(self, text: str) -> list[dict]:
+        """Process full accumulated text, return any verse emissions.
+
+        Args:
+            text: The full accumulated transcript so far (not a delta).
+                  Resets internal accumulator to this text.
+
+        Returns:
+            List of emitted verses [{"surah": int, "ayah": int, "score": float}]
+        """
+        normalized = normalize_arabic(text)
+        if not normalized.strip():
+            return []
+
+        self._accumulated = normalized
+        return self._evaluate()
+
+    def process_delta(self, new_text: str) -> list[dict]:
+        """Process new text delta (appended to internal accumulator).
+
+        Use this for streaming — each call appends new words rather than
+        resetting the accumulator, so text trimming from previous emissions
+        is preserved.
+
+        Args:
+            new_text: New text to append (just this chunk's transcript).
+
+        Returns:
+            List of emitted verses [{"surah": int, "ayah": int, "score": float}]
+        """
+        normalized = normalize_arabic(new_text)
+        if not normalized.strip():
+            return []
+
+        if self._accumulated:
+            self._accumulated += " " + normalized
+        else:
+            self._accumulated = normalized
+
+        return self._evaluate()
+
     def finalize(self) -> list[dict]:
         """Flush any remaining match as a final emission."""
         if self._current_match and self._current_match["score"] >= MIN_EMIT_SCORE:
-            return [self._emit(self._current_match)]
+            e = self._emit(self._current_match)
+            return [e] if e else []
         return []
