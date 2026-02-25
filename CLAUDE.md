@@ -104,7 +104,9 @@ Use `from shared.X import ...` (not `from offline_tarteel.X`):
 - `shared.quran_db.QuranDB` — loads `data/quran.json` (6,236 verses), provides:
   - `match_verse(text)` — fuzzy match with multi-ayah span support
   - `search(text, top_k=5)` — top-k Levenshtein matches
-  - `get_verse(surah, ayah)`, `get_surah(surah)`
+  - `get_verse(surah, ayah)`, `get_surah(surah)`, `get_next_verse(surah, ayah)`
+- `shared.verse_tracker.VerseTracker` — streaming verse detection with continuation bias
+- `shared.streaming.StreamingPipeline` — connects ASR backends to verse tracker
 
 ## Running Benchmarks
 
@@ -116,6 +118,24 @@ Use `from shared.X import ...` (not `from offline_tarteel.X`):
 
 Results go to `benchmark/results/<timestamp>.json`.
 
+### Scoring
+
+The benchmark uses **streaming sequence evaluation**. Each experiment's `transcribe()` output is fed through `VerseTracker` which emits an ordered sequence of `(surah, ayah)` detections. Metrics:
+
+- **Recall**: fraction of expected verses detected in the correct order
+- **Precision**: fraction of predicted verses that are correct
+- **Sequence Accuracy**: 1.0 only if the full ordered sequence matches exactly
+
+### Experiment Interface
+
+Each experiment must export:
+
+```python
+def transcribe(audio_path: str) -> str:  # raw transcript (required for benchmark)
+def predict(audio_path: str) -> dict:     # full prediction with verse match
+def model_size() -> int:                  # model size in bytes
+```
+
 ## Test Corpus
 
 `benchmark/test_corpus/manifest.json` — 55 samples:
@@ -126,15 +146,15 @@ Results go to `benchmark/results/<timestamp>.json`.
 
 ## Current Experiments
 
-| Experiment | Approach | Accuracy | Latency | Model Size |
-|---|---|---|---|---|
-| ctc-alignment | Arabic CTC wav2vec2 → QuranDB match | 81% | ~0.24s | 1.2 GB |
-| whisper-lora | Whisper-small + LoRA → QuranDB match | 78% | ~0.96s | 485 MB |
-| tarteel-whisper-base | tarteel-ai/whisper-base-ar-quran → QuranDB match | 78% | ~1.04s | 290 MB |
-| embedding-search | HuBERT → FAISS index | — | — | — |
-| contrastive | QuranCLAP (HuBERT+AraBERT contrastive) | — | — | — |
-| streaming-asr | mlx-whisper chunked → QuranDB match | — | — | — |
-| new-models/* | Various HF models (6 models) | — | — | — |
+| Experiment | Approach | Recall | Precision | SeqAcc | Latency | Size |
+|---|---|---|---|---|---|---|
+| tarteel-whisper-base | tarteel-ai/whisper-base-ar-quran | 72% | 72% | 62% | ~1.6s | 290 MB |
+| whisper-lora | Whisper-small + LoRA | 64% | 65% | 58% | ~1.3s | 485 MB |
+| ctc-alignment | Arabic CTC wav2vec2 | 69% | 65% | 56% | ~1.0s | 1.2 GB |
+| embedding-search | HuBERT → FAISS index | — | — | — | — | — |
+| contrastive | QuranCLAP (HuBERT+AraBERT) | — | — | — | — | — |
+| streaming-asr | mlx-whisper chunked | — | — | — | — | — |
+| new-models/* | Various HF models | — | — | — | — | — |
 
 ## Python Environment
 

@@ -1,29 +1,32 @@
 [
   {
     "name": "ctc-alignment",
-    "accuracy": 0.8108108108108109,
-    "correct": 30,
-    "total": 37,
-    "avg_latency": 0.2465774212453382,
+    "recall": 0.6860606060606063,
+    "precision": 0.6484848484848486,
+    "sequence_accuracy": 0.5636363636363636,
+    "total": 55,
+    "avg_latency": 0.9900796257271643,
     "model_size": 1258291200,
-    "timestamp": "2026-02-25_132442"
+    "timestamp": "2026-02-25_144112"
   },
   {
     "name": "tarteel-whisper-base",
-    "accuracy": 0.7837837837837838,
-    "correct": 29,
-    "total": 37,
-    "avg_latency": 1.04350935581071,
+    "recall": 0.7181818181818181,
+    "precision": 0.7151515151515152,
+    "sequence_accuracy": 0.6181818181818182,
+    "total": 55,
+    "avg_latency": 1.5842765878362115,
     "model_size": 304087040,
-    "timestamp": "2026-02-25_131412"
+    "timestamp": "2026-02-25_144440"
   },
   {
     "name": "whisper-lora",
-    "accuracy": 0.7837837837837838,
-    "correct": 29,
-    "total": 37,
-    "avg_latency": 0.9572283681623663,
+    "recall": 0.643939393939394,
+    "precision": 0.6545454545454545,
+    "sequence_accuracy": 0.5818181818181818,
+    "total": 55,
+    "avg_latency": 1.3385206377998904,
     "model_size": 508597743,
-    "timestamp": "2026-02-25_090506"
+    "timestamp": "2026-02-25_144250"
   }
 ]
