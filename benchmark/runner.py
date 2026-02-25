@@ -28,6 +28,7 @@ EXPERIMENT_REGISTRY = {
     "embedding-search": EXPERIMENTS_DIR / "embedding-search" / "run.py",
     "contrastive": EXPERIMENTS_DIR / "contrastive" / "run.py",
     "streaming-asr": EXPERIMENTS_DIR / "streaming-asr" / "run.py",
+    "ctc-alignment": EXPERIMENTS_DIR / "ctc-alignment" / "run.py",
 }
 
 NEW_MODELS_PATH = EXPERIMENTS_DIR / "new-models" / "run.py"
