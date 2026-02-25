@@ -271,11 +271,26 @@ def train():
 def download_model():
     from pathlib import Path
 
+    vol.reload()
+
+    # Try final model first, then fall back to latest checkpoint
     model_dir = Path("/training/ctc-model")
     if not model_dir.exists():
-        print("No model found! Run training first.")
-        return {}
+        # Find latest checkpoint
+        ckpt_dir = Path("/training/ctc-checkpoints")
+        if ckpt_dir.exists():
+            checkpoints = sorted(ckpt_dir.glob("checkpoint-*"))
+            if checkpoints:
+                model_dir = checkpoints[-1]
+                print(f"No final model found, using checkpoint: {model_dir.name}")
+            else:
+                print("No checkpoints found! Run training first.")
+                return {}
+        else:
+            print("No training output found! Run training first.")
+            return {}
 
+    print(f"Downloading from {model_dir}...")
     files = {}
     for f in model_dir.rglob("*"):
         if f.is_file():
@@ -287,11 +302,12 @@ def download_model():
 
 
 @app.local_entrypoint()
-def main():
+def main(download_only: bool = False):
     from pathlib import Path
 
-    print("Starting CTC training on Modal GPU...")
-    train.remote()
+    if not download_only:
+        print("Starting CTC training on Modal GPU...")
+        train.remote()
 
     print("\nDownloading model...")
     out_dir = Path("data/ctc-model")

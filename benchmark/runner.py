@@ -29,6 +29,7 @@ EXPERIMENT_REGISTRY = {
     "contrastive": EXPERIMENTS_DIR / "contrastive" / "run.py",
     "streaming-asr": EXPERIMENTS_DIR / "streaming-asr" / "run.py",
     "ctc-alignment": EXPERIMENTS_DIR / "ctc-alignment" / "run.py",
+    "tarteel-whisper-base": EXPERIMENTS_DIR / "tarteel-whisper-base" / "run.py",
 }
 
 NEW_MODELS_PATH = EXPERIMENTS_DIR / "new-models" / "run.py"
@@ -176,6 +177,35 @@ def save_results(results: list[dict]):
     with open(path, "w") as f:
         json.dump(results, f, indent=2, default=str)
     print(f"Results saved to {path}")
+
+    # Update latest.json — merge new results with existing best-per-experiment
+    latest_path = RESULTS_DIR / "latest.json"
+    if latest_path.exists():
+        with open(latest_path) as f:
+            latest = {r["name"]: r for r in json.load(f)}
+    else:
+        latest = {}
+
+    for r in results:
+        summary = {
+            "name": r["name"],
+            "accuracy": r["accuracy"],
+            "correct": r["correct"],
+            "total": r["total"],
+            "avg_latency": r["avg_latency"],
+            "model_size": r["model_size"],
+            "timestamp": timestamp,
+        }
+        # Keep the better result (higher accuracy, or same accuracy but lower latency)
+        prev = latest.get(r["name"])
+        if prev is None or r["accuracy"] > prev["accuracy"] or (
+            r["accuracy"] == prev["accuracy"] and r["avg_latency"] < prev.get("avg_latency", float("inf"))
+        ):
+            latest[r["name"]] = summary
+
+    with open(latest_path, "w") as f:
+        json.dump(sorted(latest.values(), key=lambda x: x["name"]), f, indent=2, default=str)
+    print(f"Updated {latest_path}")
 
 
 def main():

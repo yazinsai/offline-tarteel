@@ -125,13 +125,15 @@ Results go to `benchmark/results/<timestamp>.json`.
 
 ## Current Experiments
 
-| Experiment | Approach | Accuracy | Latency |
-|---|---|---|---|
-| whisper-lora | Whisper-small + LoRA → QuranDB match | 78% | ~1s |
-| embedding-search | HuBERT → FAISS index | — | — |
-| contrastive | QuranCLAP (HuBERT+AraBERT contrastive) | — | — |
-| streaming-asr | mlx-whisper chunked → QuranDB match | — | — |
-| new-models/* | Various HF models (6 models) | — | — |
+| Experiment | Approach | Accuracy | Latency | Model Size |
+|---|---|---|---|---|
+| ctc-alignment | Arabic CTC wav2vec2 → QuranDB match | 81% | ~0.24s | 1.2 GB |
+| whisper-lora | Whisper-small + LoRA → QuranDB match | 78% | ~0.96s | 485 MB |
+| tarteel-whisper-base | tarteel-ai/whisper-base-ar-quran → QuranDB match | 78% | ~1.04s | 290 MB |
+| embedding-search | HuBERT → FAISS index | — | — | — |
+| contrastive | QuranCLAP (HuBERT+AraBERT contrastive) | — | — | — |
+| streaming-asr | mlx-whisper chunked → QuranDB match | — | — | — |
+| new-models/* | Various HF models (6 models) | — | — | — |
 
 ## Python Environment
 

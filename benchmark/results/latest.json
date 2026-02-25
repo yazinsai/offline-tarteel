@@ -1,0 +1,29 @@
+[
+  {
+    "name": "ctc-alignment",
+    "accuracy": 0.40540540540540543,
+    "correct": 15,
+    "total": 37,
+    "avg_latency": 0.24200652581262025,
+    "model_size": 1258291200,
+    "timestamp": "2026-02-25_132106"
+  },
+  {
+    "name": "tarteel-whisper-base",
+    "accuracy": 0.7837837837837838,
+    "correct": 29,
+    "total": 37,
+    "avg_latency": 1.04350935581071,
+    "model_size": 304087040,
+    "timestamp": "2026-02-25_131412"
+  },
+  {
+    "name": "whisper-lora",
+    "accuracy": 0.7837837837837838,
+    "correct": 29,
+    "total": 37,
+    "avg_latency": 0.9572283681623663,
+    "model_size": 508597743,
+    "timestamp": "2026-02-25_090506"
+  }
+]
