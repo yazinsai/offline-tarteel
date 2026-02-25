@@ -1,11 +1,337 @@
 {
   "samples": [
-    {"id": "user_nisa_51", "file": "nisa_51.m4a", "surah": 4, "ayah": 51, "ayah_end": null, "category": "medium", "source": "user"},
-    {"id": "user_ikhlas_2_3", "file": "ikhlas_2_3.m4a", "surah": 112, "ayah": 2, "ayah_end": 3, "category": "multi", "source": "user"},
-    {"id": "ref_001001", "file": "001001.mp3", "surah": 1, "ayah": 1, "ayah_end": null, "category": "medium", "source": "everyayah"},
-    {"id": "ref_001002", "file": "001002.mp3", "surah": 1, "ayah": 2, "ayah_end": null, "category": "medium", "source": "everyayah"},
-    {"id": "ref_002255", "file": "002255.mp3", "surah": 2, "ayah": 255, "ayah_end": null, "category": "long", "source": "everyayah"},
-    {"id": "ref_112001", "file": "112001.mp3", "surah": 112, "ayah": 1, "ayah_end": null, "category": "short", "source": "everyayah"},
-    {"id": "ref_036001", "file": "036001.mp3", "surah": 36, "ayah": 1, "ayah_end": null, "category": "short", "source": "everyayah"}
+    {
+      "id": "user_nisa_51",
+      "file": "nisa_51.m4a",
+      "surah": 4,
+      "ayah": 51,
+      "ayah_end": null,
+      "category": "medium",
+      "source": "user"
+    },
+    {
+      "id": "user_ikhlas_2_3",
+      "file": "ikhlas_2_3.m4a",
+      "surah": 112,
+      "ayah": 2,
+      "ayah_end": 3,
+      "category": "multi",
+      "source": "user"
+    },
+    {
+      "id": "ref_001001",
+      "file": "001001.mp3",
+      "surah": 1,
+      "ayah": 1,
+      "ayah_end": null,
+      "category": "medium",
+      "source": "everyayah"
+    },
+    {
+      "id": "ref_001002",
+      "file": "001002.mp3",
+      "surah": 1,
+      "ayah": 2,
+      "ayah_end": null,
+      "category": "medium",
+      "source": "everyayah"
+    },
+    {
+      "id": "ref_002255",
+      "file": "002255.mp3",
+      "surah": 2,
+      "ayah": 255,
+      "ayah_end": null,
+      "category": "long",
+      "source": "everyayah"
+    },
+    {
+      "id": "ref_112001",
+      "file": "112001.mp3",
+      "surah": 112,
+      "ayah": 1,
+      "ayah_end": null,
+      "category": "short",
+      "source": "everyayah"
+    },
+    {
+      "id": "ref_036001",
+      "file": "036001.mp3",
+      "surah": 36,
+      "ayah": 1,
+      "ayah_end": null,
+      "category": "short",
+      "source": "everyayah"
+    },
+    {
+      "id": "retasy_000",
+      "file": "retasy_000.wav",
+      "surah": 1,
+      "ayah": 1,
+      "ayah_end": null,
+      "category": "short",
+      "source": "retasy"
+    },
+    {
+      "id": "retasy_001",
+      "file": "retasy_001.wav",
+      "surah": 1,
+      "ayah": 1,
+      "ayah_end": null,
+      "category": "short",
+      "source": "retasy"
+    },
+    {
+      "id": "retasy_002",
+      "file": "retasy_002.wav",
+      "surah": 1,
+      "ayah": 4,
+      "ayah_end": null,
+      "category": "short",
+      "source": "retasy"
+    },
+    {
+      "id": "retasy_003",
+      "file": "retasy_003.wav",
+      "surah": 1,
+      "ayah": 2,
+      "ayah_end": null,
+      "category": "short",
+      "source": "retasy"
+    },
+    {
+      "id": "retasy_004",
+      "file": "retasy_004.wav",
+      "surah": 114,
+      "ayah": 3,
+      "ayah_end": null,
+      "category": "short",
+      "source": "retasy"
+    },
+    {
+      "id": "retasy_005",
+      "file": "retasy_005.wav",
+      "surah": 103,
+      "ayah": 2,
+      "ayah_end": null,
+      "category": "short",
+      "source": "retasy"
+    },
+    {
+      "id": "retasy_006",
+      "file": "retasy_006.wav",
+      "surah": 1,
+      "ayah": 4,
+      "ayah_end": null,
+      "category": "short",
+      "source": "retasy"
+    },
+    {
+      "id": "retasy_007",
+      "file": "retasy_007.wav",
+      "surah": 1,
+      "ayah": 1,
+      "ayah_end": null,
+      "category": "short",
+      "source": "retasy"
+    },
+    {
+      "id": "retasy_008",
+      "file": "retasy_008.wav",
+      "surah": 114,
+      "ayah": 2,
+      "ayah_end": null,
+      "category": "short",
+      "source": "retasy"
+    },
+    {
+      "id": "retasy_009",
+      "file": "retasy_009.wav",
+      "surah": 111,
+      "ayah": 3,
+      "ayah_end": null,
+      "category": "short",
+      "source": "retasy"
+    },
+    {
+      "id": "retasy_010",
+      "file": "retasy_010.wav",
+      "surah": 113,
+      "ayah": 3,
+      "ayah_end": null,
+      "category": "short",
+      "source": "retasy"
+    },
+    {
+      "id": "retasy_011",
+      "file": "retasy_011.wav",
+      "surah": 1,
+      "ayah": 6,
+      "ayah_end": null,
+      "category": "short",
+      "source": "retasy"
+    },
+    {
+      "id": "retasy_012",
+      "file": "retasy_012.wav",
+      "surah": 114,
+      "ayah": 2,
+      "ayah_end": null,
+      "category": "short",
+      "source": "retasy"
+    },
+    {
+      "id": "retasy_013",
+      "file": "retasy_013.wav",
+      "surah": 103,
+      "ayah": 2,
+      "ayah_end": null,
+      "category": "short",
+      "source": "retasy"
+    },
+    {
+      "id": "retasy_014",
+      "file": "retasy_014.wav",
+      "surah": 1,
+      "ayah": 4,
+      "ayah_end": null,
+      "category": "short",
+      "source": "retasy"
+    },
+    {
+      "id": "retasy_015",
+      "file": "retasy_015.wav",
+      "surah": 110,
+      "ayah": 3,
+      "ayah_end": null,
+      "category": "medium",
+      "source": "retasy"
+    },
+    {
+      "id": "retasy_016",
+      "file": "retasy_016.wav",
+      "surah": 3,
+      "ayah": 2,
+      "ayah_end": null,
+      "category": "medium",
+      "source": "retasy"
+    },
+    {
+      "id": "retasy_017",
+      "file": "retasy_017.wav",
+      "surah": 1,
+      "ayah": 7,
+      "ayah_end": null,
+      "category": "medium",
+      "source": "retasy"
+    },
+    {
+      "id": "retasy_018",
+      "file": "retasy_018.wav",
+      "surah": 110,
+      "ayah": 3,
+      "ayah_end": null,
+      "category": "medium",
+      "source": "retasy"
+    },
+    {
+      "id": "retasy_019",
+      "file": "retasy_019.wav",
+      "surah": 3,
+      "ayah": 2,
+      "ayah_end": null,
+      "category": "medium",
+      "source": "retasy"
+    },
+    {
+      "id": "retasy_020",
+      "file": "retasy_020.wav",
+      "surah": 1,
+      "ayah": 7,
+      "ayah_end": null,
+      "category": "medium",
+      "source": "retasy"
+    },
+    {
+      "id": "retasy_021",
+      "file": "retasy_021.wav",
+      "surah": 1,
+      "ayah": 7,
+      "ayah_end": null,
+      "category": "medium",
+      "source": "retasy"
+    },
+    {
+      "id": "retasy_022",
+      "file": "retasy_022.wav",
+      "surah": 1,
+      "ayah": 7,
+      "ayah_end": null,
+      "category": "medium",
+      "source": "retasy"
+    },
+    {
+      "id": "retasy_023",
+      "file": "retasy_023.wav",
+      "surah": 110,
+      "ayah": 2,
+      "ayah_end": null,
+      "category": "medium",
+      "source": "retasy"
+    },
+    {
+      "id": "retasy_024",
+      "file": "retasy_024.wav",
+      "surah": 1,
+      "ayah": 7,
+      "ayah_end": null,
+      "category": "medium",
+      "source": "retasy"
+    },
+    {
+      "id": "retasy_025",
+      "file": "retasy_025.wav",
+      "surah": 1,
+      "ayah": 7,
+      "ayah_end": null,
+      "category": "medium",
+      "source": "retasy"
+    },
+    {
+      "id": "retasy_026",
+      "file": "retasy_026.wav",
+      "surah": 103,
+      "ayah": 3,
+      "ayah_end": null,
+      "category": "medium",
+      "source": "retasy"
+    },
+    {
+      "id": "retasy_027",
+      "file": "retasy_027.wav",
+      "surah": 111,
+      "ayah": 2,
+      "ayah_end": null,
+      "category": "medium",
+      "source": "retasy"
+    },
+    {
+      "id": "retasy_028",
+      "file": "retasy_028.wav",
+      "surah": 42,
+      "ayah": 4,
+      "ayah_end": null,
+      "category": "medium",
+      "source": "retasy"
+    },
+    {
+      "id": "retasy_029",
+      "file": "retasy_029.wav",
+      "surah": 103,
+      "ayah": 3,
+      "ayah_end": null,
+      "category": "medium",
+      "source": "retasy"
+    }
   ]
 }
