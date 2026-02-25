@@ -15,7 +15,7 @@ app = modal.App("wav2vec2-quran-ctc")
 
 image = (
     modal.Image.debian_slim(python_version="3.11")
-    .apt_install("ffmpeg")
+    .apt_install("ffmpeg", "libsndfile1-dev")
     .pip_install(
         "torch",
         "transformers>=4.40",
@@ -108,7 +108,7 @@ def train():
     )
 
     # Freeze feature extractor (CNN layers)
-    model.freeze_feature_extractor()
+    model.freeze_feature_encoder()
 
     # -- Arabic normalization (matches shared.normalizer) --
     _DIACRITICS = re.compile(
@@ -133,7 +133,9 @@ def train():
     # -- Load dataset --
     print("Loading Buraaq/quran-md-ayahs...")
     ds = load_dataset("Buraaq/quran-md-ayahs", split="train", streaming=True)
-    ds = ds.cast_column("audio", Audio(sampling_rate=16000))
+    # Disable auto-decode — soundfile can't handle all audio formats in this dataset.
+    # We'll decode manually with torchaudio (which uses ffmpeg) in the prepare function.
+    ds = ds.cast_column("audio", Audio(decode=False))
 
     # Hold out 3 reciters for validation
     VAL_RECITERS = {
@@ -152,26 +154,55 @@ def train():
     # For val, take a finite subset (streaming dataset)
     val_ds = ds.filter(is_val).take(2000)
 
+    _skip_count = [0]
+
     def prepare(batch):
-        audio = batch["audio"]
-        batch["input_values"] = processor(
-            audio["array"],
-            sampling_rate=16000,
-            return_tensors=None,
-        ).input_values[0]
+        import io
+        import librosa
+        import numpy as np
 
-        # Normalize Arabic text (strip diacritics, normalize chars)
-        text = normalize_arabic(batch["ayah_ar"])
-        # Replace spaces with word delimiter for CTC
-        text_with_delim = text.replace(" ", "|")
-        batch["labels"] = processor.tokenizer(text_with_delim).input_ids
-        return batch
+        try:
+            # Decode audio with librosa (handles mp3 via audioread/ffmpeg)
+            audio_data = batch["audio"]  # dict with 'bytes' and 'path'
+            audio_bytes = audio_data["bytes"]
+            audio_array, _ = librosa.load(
+                io.BytesIO(audio_bytes), sr=16000, mono=True
+            )
 
-    train_ds = train_ds.map(prepare, remove_columns=[
+            # Skip very long audio (>15s to prevent OOM)
+            if len(audio_array) > 16000 * 15:
+                raise ValueError(f"Audio too long: {len(audio_array)/16000:.1f}s")
+
+            input_values = processor(
+                audio_array,
+                sampling_rate=16000,
+                return_tensors=None,
+            ).input_values[0]
+
+            # Normalize Arabic text (strip diacritics, normalize chars)
+            text = normalize_arabic(batch["ayah_ar"])
+            # Replace spaces with word delimiter for CTC
+            text_with_delim = text.replace(" ", "|")
+            labels = processor.tokenizer(text_with_delim).input_ids
+
+            if len(labels) == 0:
+                raise ValueError("Empty label sequence")
+
+            return {"input_values": input_values, "labels": labels, "_valid": True}
+        except Exception as e:
+            _skip_count[0] += 1
+            if _skip_count[0] <= 10:
+                print(f"Skipping bad sample ({_skip_count[0]}): {e}")
+            return {"input_values": [0.0], "labels": [0], "_valid": False}
+
+    all_columns = [
         "surah_id", "ayah_id", "surah_name_ar", "surah_name_en",
         "surah_name_tr", "ayah_count", "ayah_ar", "ayah_en", "ayah_tr",
         "reciter_id", "reciter_name", "audio",
-    ])
+    ]
+    train_ds = train_ds.map(prepare, remove_columns=all_columns)
+    train_ds = train_ds.filter(lambda x: x["_valid"])
+    train_ds = train_ds.remove_columns(["_valid"])
 
     # -- Data collator --
     @dataclass
@@ -194,17 +225,18 @@ def train():
     data_collator = DataCollatorCTCWithPadding(processor=processor)
 
     # -- Training --
+    model.gradient_checkpointing_enable()
+
     training_args = TrainingArguments(
         output_dir=str(CHECKPOINT_DIR),
-        per_device_train_batch_size=16,
-        gradient_accumulation_steps=2,
+        per_device_train_batch_size=4,
+        gradient_accumulation_steps=8,
         learning_rate=3e-5,
         warmup_steps=500,
         max_steps=5000,
         fp16=True,
         logging_steps=50,
         save_steps=1000,
-        group_by_length=False,  # streaming dataset
         remove_unused_columns=False,
         dataloader_pin_memory=True,
         report_to="none",
