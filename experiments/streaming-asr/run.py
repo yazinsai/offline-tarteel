@@ -20,6 +20,13 @@ def _ensure_loaded():
     _db = QuranDB()
 
 
+def transcribe(audio_path: str) -> str:
+    """Return raw mlx-whisper transcript."""
+    _ensure_loaded()
+    result = _transcriber.transcribe_batch(audio_path)
+    return result.get("text", "")
+
+
 def predict(audio_path: str) -> dict:
     _ensure_loaded()
     result = _transcriber.transcribe_batch(audio_path)

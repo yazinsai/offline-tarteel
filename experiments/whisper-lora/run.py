@@ -32,6 +32,23 @@ def _ensure_loaded():
     _db = QuranDB()
 
 
+def transcribe(audio_path: str) -> str:
+    """Return raw Whisper transcript."""
+    _ensure_loaded()
+    audio = load_audio(audio_path)
+    inputs = _processor(audio, sampling_rate=16000, return_tensors="pt")
+    inputs = {k: v.to(_model.device) for k, v in inputs.items()}
+    with torch.no_grad():
+        ids = _model.generate(
+            inputs["input_features"],
+            max_new_tokens=225,
+            repetition_penalty=1.2,
+            language="ar",
+            task="transcribe",
+        )
+    return _processor.batch_decode(ids, skip_special_tokens=True)[0]
+
+
 def predict(audio_path: str) -> dict:
     _ensure_loaded()
     audio = load_audio(audio_path)

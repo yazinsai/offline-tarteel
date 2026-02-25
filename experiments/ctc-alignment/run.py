@@ -58,6 +58,21 @@ def _ensure_loaded():
     _db = QuranDB()
 
 
+def transcribe(audio_path: str) -> str:
+    """Return raw greedy-decoded transcript."""
+    _ensure_loaded()
+    audio = load_audio(audio_path)
+    inputs = _processor(
+        audio, sampling_rate=16000, return_tensors="pt", padding=True
+    )
+    inputs = {k: v.to(_device) for k, v in inputs.items()}
+    with torch.no_grad():
+        logits = _model(**inputs).logits
+    pred_ids = torch.argmax(logits, dim=-1)[0]
+    text = _processor.decode(pred_ids.cpu().numpy())
+    return normalize_arabic(text)
+
+
 def _spaceless_search(text: str, top_k: int = 50) -> list[dict]:
     """Search QuranDB with spaces stripped from both query and candidates.
     CTC models may not produce word delimiters, so spaceless matching
