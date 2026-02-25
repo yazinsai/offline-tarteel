@@ -13,11 +13,11 @@ import time
 import json
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from offline_tarteel.audio import load_audio
-from offline_tarteel.quran_db import QuranDB
-from offline_tarteel.normalizer import normalize_arabic
+from shared.audio import load_audio
+from shared.quran_db import QuranDB
+from shared.normalizer import normalize_arabic
 
 # ── Test cases ──────────────────────────────────────────────────────────────
 TEST_CASES = [

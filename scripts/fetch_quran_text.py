@@ -4,8 +4,8 @@ import urllib.request
 from pathlib import Path
 import sys
 
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
-from offline_tarteel.normalizer import normalize_arabic
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from shared.normalizer import normalize_arabic
 
 DATA_DIR = Path(__file__).parent.parent / "data"
 DATA_DIR.mkdir(exist_ok=True)

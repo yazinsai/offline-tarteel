@@ -8,14 +8,14 @@ import warnings
 import re
 
 warnings.filterwarnings("ignore")
-sys.path.insert(0, str(__import__("pathlib").Path(__file__).parent.parent / "src"))
+sys.path.insert(0, str(__import__("pathlib").Path(__file__).parent.parent))
 
 import torch
 from transformers import AutoProcessor, WhisperForConditionalGeneration
 from peft import PeftModel
-from offline_tarteel.audio import load_audio
-from offline_tarteel.quran_db import QuranDB
-from offline_tarteel.normalizer import normalize_arabic
+from shared.audio import load_audio
+from shared.quran_db import QuranDB
+from shared.normalizer import normalize_arabic
 from Levenshtein import ratio
 from pathlib import Path
 
