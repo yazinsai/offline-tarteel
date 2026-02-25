@@ -15,6 +15,8 @@ CONTINUATION_BONUS = 0.15
 SCORE_DROP_THRESHOLD = 0.15  # emit when score drops this much below peak
 MIN_EMIT_SCORE = 0.3  # minimum score to consider a match real
 OVERFLOW_RATIO = 1.15  # if accumulated words > verse words * this, try splitting
+STREAMING_MIN_EMIT_SCORE = 0.5
+MIN_WORDS_FOR_MATCH = 3
 
 
 class VerseTracker:
@@ -24,8 +26,11 @@ class VerseTracker:
         self,
         db: QuranDB = None,
         last_emission: tuple[int, int] | None = None,
+        streaming_mode: bool = False,
     ):
         self.db = db or QuranDB()
+        self._streaming_mode = streaming_mode
+        self._min_emit_score = STREAMING_MIN_EMIT_SCORE if streaming_mode else MIN_EMIT_SCORE
         self._accumulated = ""
         self._current_match: dict | None = None  # {surah, ayah, text_clean, score}
         self._peak_score: float = 0.0
@@ -64,6 +69,10 @@ class VerseTracker:
         if not text.strip():
             return None
 
+        # Streaming mode: require minimum word count
+        if self._streaming_mode and len(text.split()) < MIN_WORDS_FOR_MATCH:
+            return None
+
         best = None
         best_score = 0.0
 
@@ -78,7 +87,7 @@ class VerseTracker:
                     "score": best_score,
                 }
 
-        if best and best["score"] >= MIN_EMIT_SCORE:
+        if best and best["score"] >= self._min_emit_score:
             return best
         return None
 
@@ -161,7 +170,7 @@ class VerseTracker:
             else:
                 self._current_match = match
         else:
-            if self._current_match and self._current_match["score"] >= MIN_EMIT_SCORE:
+            if self._current_match and self._current_match["score"] >= self._min_emit_score:
                 e = self._emit(self._current_match)
                 if e:
                     emissions.append(e)
@@ -222,7 +231,7 @@ class VerseTracker:
 
     def finalize(self) -> list[dict]:
         """Flush any remaining match as a final emission."""
-        if self._current_match and self._current_match["score"] >= MIN_EMIT_SCORE:
+        if self._current_match and self._current_match["score"] >= self._min_emit_score:
             e = self._emit(self._current_match)
             return [e] if e else []
         return []

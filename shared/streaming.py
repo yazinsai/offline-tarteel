@@ -21,6 +21,10 @@ from shared.verse_tracker import VerseTracker
 
 SAMPLE_RATE = 16000
 MIN_CHUNK_SAMPLES = 8000  # 0.5s — skip chunks shorter than this
+MIN_CHUNK_LOG_PROB = -1.0
+MIN_CHUNK_WORDS = 2
+HIGH_CONFIDENCE_THRESHOLD = 0.7
+MAX_HOLD_CHUNKS = 3
 
 
 class StreamingPipeline:
@@ -82,9 +86,13 @@ class StreamingPipeline:
         the provided backend, accumulates text, and feeds the growing
         transcript to VerseTracker after each chunk.
 
+        Supports confidence gating: if transcribe_fn returns a dict with
+        "text" and "avg_logprob" keys, chunks with low confidence are skipped.
+        For backward compatibility, transcribe_fn may also return a plain str.
+
         Args:
             audio_path: Path to audio file
-            transcribe_fn: Function(audio_path: str) -> str
+            transcribe_fn: Function(audio_path: str) -> str | dict
             chunk_seconds: Duration of each audio chunk
             overlap_seconds: Overlap between consecutive chunks
 
@@ -96,40 +104,82 @@ class StreamingPipeline:
         overlap_size = int(overlap_seconds * SAMPLE_RATE)
         step_size = max(chunk_size - overlap_size, 1)
 
-        tracker = VerseTracker(self.db)
-        all_emissions = []
+        tracker = VerseTracker(self.db, streaming_mode=True)
+        confirmed = []
+        tentative = None
+        tentative_age = 0
 
         pos = 0
         while pos < len(audio):
             chunk_end = min(pos + chunk_size, len(audio))
             chunk = audio[pos:chunk_end]
 
-            # Skip very short final chunks
             if len(chunk) < MIN_CHUNK_SAMPLES:
                 break
 
-            # Pad short chunks to 1s so Whisper-based models don't choke
             if len(chunk) < SAMPLE_RATE:
                 chunk = np.pad(chunk, (0, SAMPLE_RATE - len(chunk)))
 
-            # Save chunk to temp WAV, transcribe, clean up
             tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
             try:
                 sf.write(tmp.name, chunk, SAMPLE_RATE)
                 tmp.close()
-                chunk_text = transcribe_fn(tmp.name).strip()
+                raw = transcribe_fn(tmp.name)
             except Exception:
-                chunk_text = ""
+                raw = ""
             finally:
                 os.unlink(tmp.name)
 
-            if chunk_text:
-                # Use process_delta so text trimming from previous
-                # emissions is preserved across chunks
-                emissions = tracker.process_delta(chunk_text)
-                all_emissions.extend(emissions)
+            # Handle both str and dict returns from transcribe_fn
+            if isinstance(raw, dict):
+                chunk_text = raw.get("text", "").strip()
+                avg_logprob = raw.get("avg_logprob", 0.0)
+            else:
+                chunk_text = str(raw).strip() if raw else ""
+                avg_logprob = 0.0  # no gating for plain str
+
+            # Layer 1: Confidence gating
+            chunk_words = len(chunk_text.split()) if chunk_text else 0
+            is_gated = False
+            if isinstance(raw, dict):  # only gate when confidence info available
+                if avg_logprob < MIN_CHUNK_LOG_PROB or chunk_words < MIN_CHUNK_WORDS:
+                    is_gated = True
+
+            if is_gated or not chunk_text:
+                # Track tentative age
+                if tentative is not None:
+                    tentative_age += 1
+                    if tentative_age >= MAX_HOLD_CHUNKS:
+                        tentative = None  # retract
+                        tentative_age = 0
+                pos += step_size
+                continue
+
+            # Feed to tracker
+            emissions = tracker.process_delta(chunk_text)
+
+            # Layer 4: Buffered confirmation
+            # Valid chunk arrived -- confirm any pending tentative
+            if tentative is not None:
+                confirmed.append(tentative)
+                tentative = None
+                tentative_age = 0
+
+            for e in emissions:
+                if e["score"] >= HIGH_CONFIDENCE_THRESHOLD:
+                    confirmed.append(e)
+                else:
+                    if tentative is not None:
+                        confirmed.append(tentative)
+                    tentative = e
+                    tentative_age = 0
 
             pos += step_size
 
-        all_emissions.extend(tracker.finalize())
-        return all_emissions
+        # Finalize: confirm tentative if score is decent
+        from shared.verse_tracker import STREAMING_MIN_EMIT_SCORE
+        if tentative is not None and tentative["score"] >= STREAMING_MIN_EMIT_SCORE:
+            confirmed.append(tentative)
+
+        confirmed.extend(tracker.finalize())
+        return confirmed

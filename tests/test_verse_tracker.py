@@ -56,3 +56,38 @@ def test_empty_input():
     emissions = tracker.process_text("")
     emissions += tracker.finalize()
     assert emissions == []
+
+
+def test_streaming_mode_rejects_low_score():
+    """In streaming mode, MIN_EMIT_SCORE is 0.5, so a weak match shouldn't emit."""
+    tracker = VerseTracker(db, streaming_mode=True)
+    # A short garbled fragment that might match something at 0.3-0.4
+    garbage = "يا ايها"
+    emissions = tracker.process_delta(garbage)
+    emissions += tracker.finalize()
+    # Should emit nothing — score too low for streaming threshold
+    assert emissions == []
+
+
+def test_streaming_mode_min_words_gate():
+    """In streaming mode, fewer than 3 accumulated words should not match."""
+    tracker = VerseTracker(db, streaming_mode=True)
+    # Just 2 words — should be gated even if they partially match a verse
+    emissions = tracker.process_delta("بسم الله")
+    assert emissions == []
+    # Now add more words to cross the threshold
+    v = db.get_verse(1, 1)
+    emissions = tracker.process_delta(v["text_clean"])
+    emissions += tracker.finalize()
+    assert len(emissions) >= 1
+    assert emissions[0]["surah"] == 1
+
+
+def test_non_streaming_mode_unchanged():
+    """Non-streaming mode should still work with the old MIN_EMIT_SCORE of 0.3."""
+    tracker = VerseTracker(db)  # default: streaming_mode=False
+    v = db.get_verse(1, 1)
+    emissions = tracker.process_text(v["text_clean"])
+    emissions += tracker.finalize()
+    assert len(emissions) >= 1
+    assert emissions[0]["surah"] == 1 and emissions[0]["ayah"] == 1

@@ -87,6 +87,15 @@ class StreamingTranscriber:
         rms = np.sqrt(np.mean(audio_chunk ** 2))
         return rms < threshold
 
+    @staticmethod
+    def _extract_avg_logprob(result: dict) -> float:
+        """Extract average log probability across all segments."""
+        segments = result.get("segments", [])
+        if not segments:
+            return -float("inf")
+        logprobs = [s.get("avg_logprob", -float("inf")) for s in segments]
+        return sum(logprobs) / len(logprobs)
+
     def stream(self, audio_path: str) -> Generator[dict, None, None]:
         """
         Generator that yields partial transcriptions as audio is processed chunk by chunk.
@@ -139,6 +148,7 @@ class StreamingTranscriber:
             t0 = time.time()
             result = self._transcribe_chunk(chunk)
             processing_time = time.time() - t0
+            avg_logprob = self._extract_avg_logprob(result)
 
             chunk_text = result.get("text", "").strip()
 
@@ -198,6 +208,7 @@ class StreamingTranscriber:
                 "words": words,
                 "all_words": list(all_words),
                 "processing_time_s": round(processing_time, 3),
+                "avg_logprob": avg_logprob,
             }
 
             pos += step_size
@@ -236,6 +247,7 @@ class StreamingTranscriber:
         t0 = time.time()
         result = self._transcribe_chunk(audio)
         processing_time = time.time() - t0
+        avg_logprob = self._extract_avg_logprob(result)
 
         text = result.get("text", "").strip()
 
@@ -266,6 +278,7 @@ class StreamingTranscriber:
             "words": words,
             "processing_time_s": round(processing_time, 3),
             "duration_s": round(len(audio) / SAMPLE_RATE, 3),
+            "avg_logprob": avg_logprob,
         }
 
 
