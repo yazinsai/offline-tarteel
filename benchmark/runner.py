@@ -224,9 +224,7 @@ def run_experiment(
 
 
 def format_size(size_bytes: int) -> str:
-    if size_bytes >= 1024 * 1024 * 1024:
-        return f"{size_bytes / (1024**3):.1f} GB"
-    return f"{size_bytes / (1024**2):.0f} MB"
+    return f"{size_bytes / (1024**3):.1f} GB"
 
 
 def print_table(results: list[dict]):

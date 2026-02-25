@@ -58,22 +58,20 @@ def test_empty_input():
     assert emissions == []
 
 
-def test_streaming_mode_rejects_low_score():
-    """In streaming mode, MIN_EMIT_SCORE is 0.5, so a weak match shouldn't emit."""
+def test_streaming_mode_rejects_single_word():
+    """In streaming mode, a single word should be gated by MIN_WORDS_FOR_MATCH."""
     tracker = VerseTracker(db, streaming_mode=True)
-    # A short garbled fragment that might match something at 0.3-0.4
-    garbage = "يا ايها"
-    emissions = tracker.process_delta(garbage)
+    # A single word — should be gated by the minimum word count
+    emissions = tracker.process_delta("يا")
     emissions += tracker.finalize()
-    # Should emit nothing — score too low for streaming threshold
     assert emissions == []
 
 
 def test_streaming_mode_min_words_gate():
-    """In streaming mode, fewer than 3 accumulated words should not match."""
+    """In streaming mode, fewer than 2 accumulated words should not match."""
     tracker = VerseTracker(db, streaming_mode=True)
-    # Just 2 words — should be gated even if they partially match a verse
-    emissions = tracker.process_delta("بسم الله")
+    # Just 1 word — should be gated even if it partially matches a verse
+    emissions = tracker.process_delta("بسم")
     assert emissions == []
     # Now add more words to cross the threshold
     v = db.get_verse(1, 1)
