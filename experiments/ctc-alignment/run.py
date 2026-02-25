@@ -32,6 +32,8 @@ _scorer_mod = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_scorer_mod)
 score_candidates = _scorer_mod.score_candidates
 
+from Levenshtein import ratio as lev_ratio
+
 LOCAL_MODEL = PROJECT_ROOT / "data" / "ctc-model"
 PRETRAINED_MODEL = "jonatasgrosman/wav2vec2-large-xlsr-53-arabic"
 TOP_K = 50  # candidates for CTC re-scoring
@@ -54,6 +56,21 @@ def _ensure_loaded():
     _device = "mps" if torch.backends.mps.is_available() else "cpu"
     _model.to(_device)
     _db = QuranDB()
+
+
+def _spaceless_search(text: str, top_k: int = 50) -> list[dict]:
+    """Search QuranDB with spaces stripped from both query and candidates.
+    CTC models may not produce word delimiters, so spaceless matching
+    gives better candidate pruning.
+    """
+    query = text.replace(" ", "")
+    scored = []
+    for v in _db.verses:
+        verse_spaceless = v["text_clean"].replace(" ", "")
+        score = lev_ratio(query, verse_spaceless)
+        scored.append({**v, "score": score, "text": v["text_uthmani"]})
+    scored.sort(key=lambda x: x["score"], reverse=True)
+    return scored[:top_k]
 
 
 def _tokenize_for_ctc(text: str) -> list[int]:
@@ -87,7 +104,9 @@ def predict(audio_path: str) -> dict:
         }
 
     # 3. Prune: Levenshtein top-K candidates
-    candidates = _db.search(rough_text_normalized, top_k=TOP_K)
+    # Fine-tuned CTC model may not produce word delimiters, so match
+    # spaceless text against spaceless verses for better pruning.
+    candidates = _spaceless_search(rough_text_normalized, top_k=TOP_K)
 
     # 4. CTC re-score each candidate
     blank_id = _processor.tokenizer.pad_token_id
