@@ -17,6 +17,9 @@ data/*.log
 *.wav
 node_modules/
 
+# Benchmark timestamped results (latest.json is tracked)
+benchmark/results/2026-*.json
+
 # Experiment artifacts
 experiments/contrastive/checkpoints/
 experiments/contrastive/logs/
