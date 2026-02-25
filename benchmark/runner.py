@@ -27,6 +27,7 @@ RESULTS_DIR = Path(__file__).parent / "results"
 
 EXPERIMENT_REGISTRY = {
     "whisper-lora": EXPERIMENTS_DIR / "whisper-lora" / "run.py",
+    "moonshine-lora": EXPERIMENTS_DIR / "moonshine-lora" / "run.py",
     "embedding-search": EXPERIMENTS_DIR / "embedding-search" / "run.py",
     "contrastive": EXPERIMENTS_DIR / "contrastive" / "run.py",
     "streaming-asr": EXPERIMENTS_DIR / "streaming-asr" / "run.py",
@@ -125,6 +126,26 @@ def discover_experiments(filter_name: str | None = None) -> list[dict]:
     return experiments
 
 
+def _predict_to_emissions(predict_result: dict) -> list[dict]:
+    """Convert a predict() result dict to a list of verse emissions.
+
+    predict() returns: {surah, ayah, ayah_end, score, transcript}
+    If ayah_end is set, expand to individual verse emissions.
+    """
+    if not predict_result or predict_result.get("surah", 0) == 0:
+        return []
+
+    surah = predict_result["surah"]
+    ayah_start = predict_result["ayah"]
+    ayah_end = predict_result.get("ayah_end") or ayah_start
+    score = predict_result.get("score", 0.0)
+
+    emissions = []
+    for ayah in range(ayah_start, ayah_end + 1):
+        emissions.append({"surah": surah, "ayah": ayah, "score": score})
+    return emissions
+
+
 def run_experiment(
     exp: dict,
     samples: list[dict],
@@ -132,7 +153,11 @@ def run_experiment(
     mode: str = "full",
     chunk_seconds: float = 3.0,
 ) -> dict | None:
-    """Run one experiment against all samples using streaming evaluation.
+    """Run one experiment against all samples.
+
+    Uses predict() directly when available (e.g. CTC alignment does its own
+    candidate scoring). Falls back to transcribe() + StreamingPipeline for
+    ASR-based experiments.
 
     Args:
         mode: "full" for whole-file transcription, "streaming" for chunked.
@@ -140,20 +165,31 @@ def run_experiment(
     """
     mod = _load_module(exp["name"].replace("/", "_").replace("-", "_"), exp["run_path"])
 
-    if not hasattr(mod, "transcribe"):
-        print(f"  Skipping {exp['name']} — no transcribe() function")
+    use_predict = hasattr(mod, "predict") and mode == "full"
+
+    if not use_predict and not hasattr(mod, "transcribe"):
+        print(f"  Skipping {exp['name']} — no transcribe() or predict() function")
         return None
 
-    transcribe_fn = mod.transcribe
-    if exp["model_name"]:
-        base_fn = transcribe_fn
-        transcribe_fn = lambda path, _mn=exp["model_name"]: base_fn(path, model_name=_mn)
+    if use_predict:
+        predict_fn = mod.predict
+        if exp["model_name"]:
+            base_fn = predict_fn
+            predict_fn = lambda path, _mn=exp["model_name"]: base_fn(path, model_name=_mn)
+    else:
+        transcribe_fn = mod.transcribe
+        if exp["model_name"]:
+            base_fn = transcribe_fn
+            transcribe_fn = lambda path, _mn=exp["model_name"]: base_fn(path, model_name=_mn)
 
     # Warmup
     warmup_sample = samples[0]
     audio_path = str(CORPUS_DIR / warmup_sample["file"])
     try:
-        transcribe_fn(audio_path)
+        if use_predict:
+            predict_fn(audio_path)
+        else:
+            transcribe_fn(audio_path)
     except Exception as e:
         print(f"  Warmup failed for {exp['name']}: {e}")
 
@@ -178,7 +214,10 @@ def run_experiment(
 
         try:
             start = time.perf_counter()
-            if mode == "streaming":
+            if use_predict:
+                result = predict_fn(audio_path)
+                emissions = _predict_to_emissions(result)
+            elif mode == "streaming":
                 emissions = pipeline.run_on_audio_chunked(
                     audio_path, transcribe_fn, chunk_seconds=chunk_seconds,
                 )

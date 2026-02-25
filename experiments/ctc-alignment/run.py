@@ -2,14 +2,14 @@
 
 Uses a pre-trained Arabic wav2vec2 CTC model to produce frame-level
 character logits, then scores candidate Quran verses via the CTC
-forward algorithm. Falls back to a fine-tuned local model if available.
+forward algorithm.
 
-Flow:
+Two-pass approach:
   1. Encode audio -> frame-level logits
-  2. Greedy decode -> rough text for candidate pruning
-  3. Levenshtein top-K candidates from QuranDB
-  4. CTC re-score each candidate against frame logits
-  5. Best score wins
+  2. Greedy decode -> rough text for fast Levenshtein pre-filtering
+  3. CTC-score top-200 candidates (length-normalized, short-verse safe)
+  4. For top-5 surahs, score multi-verse spans (2-4 consecutive)
+  5. Best score wins (single or multi-verse)
 """
 import sys
 import math
@@ -24,6 +24,7 @@ from transformers import Wav2Vec2ForCTC, Wav2Vec2Processor
 from shared.audio import load_audio
 from shared.quran_db import QuranDB
 from shared.normalizer import normalize_arabic
+from Levenshtein import ratio as lev_ratio
 
 # Import ctc_scorer from sibling file (hyphenated directory)
 _scorer_path = Path(__file__).parent / "ctc_scorer.py"
@@ -32,11 +33,14 @@ _scorer_mod = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_scorer_mod)
 score_candidates = _scorer_mod.score_candidates
 
-from Levenshtein import ratio as lev_ratio
+TOP_K = 100            # Levenshtein candidates for CTC re-scoring
+CHUNK_SIZE = 50        # verses per CTC scoring batch
+TOP_SURAHS = 5         # surahs to try multi-verse spans for
+MAX_SPAN = 4           # max consecutive verses in a span
+SKIP_SPAN_THRESHOLD = 0.15  # skip span scoring if best single score < this
 
 LOCAL_MODEL = PROJECT_ROOT / "data" / "ctc-model"
 PRETRAINED_MODEL = "jonatasgrosman/wav2vec2-large-xlsr-53-arabic"
-TOP_K = 50  # candidates for CTC re-scoring
 
 _model = None
 _processor = None
@@ -73,25 +77,66 @@ def transcribe(audio_path: str) -> str:
     return normalize_arabic(text)
 
 
-def _spaceless_search(text: str, top_k: int = 50) -> list[dict]:
-    """Search QuranDB with spaces stripped from both query and candidates.
-    CTC models may not produce word delimiters, so spaceless matching
-    gives better candidate pruning.
-    """
-    query = text.replace(" ", "")
-    scored = []
-    for v in _db.verses:
-        verse_spaceless = v["text_clean"].replace(" ", "")
-        score = lev_ratio(query, verse_spaceless)
-        scored.append({**v, "score": score, "text": v["text_uthmani"]})
-    scored.sort(key=lambda x: x["score"], reverse=True)
-    return scored[:top_k]
-
-
 def _tokenize_for_ctc(text: str) -> list[int]:
     """Convert Arabic text to token IDs using model's tokenizer."""
     encoded = _processor.tokenizer(text, return_tensors=None)
     return encoded["input_ids"]
+
+
+def _levenshtein_candidates(text: str, top_k: int = TOP_K) -> list[dict]:
+    """Fast Levenshtein pre-filter against all verses.
+    Uses both regular and spaceless matching, merging results.
+    """
+    normalized = normalize_arabic(text)
+    spaceless = normalized.replace(" ", "")
+
+    scored = []
+    for v in _db.verses:
+        # Best of regular and spaceless Levenshtein
+        score_regular = lev_ratio(normalized, v["text_clean"])
+        score_spaceless = lev_ratio(spaceless, v["text_clean"].replace(" ", ""))
+        best = max(score_regular, score_spaceless)
+        scored.append({**v, "score": best, "text": v["text_uthmani"]})
+
+    scored.sort(key=lambda x: x["score"], reverse=True)
+    return scored[:top_k]
+
+
+def _build_span_candidates(
+    single_results: list[tuple[dict, float]],
+) -> list[dict]:
+    """Build multi-verse span candidates from top-scoring surahs."""
+    seen = set()
+    top_surahs = []
+    for cand, _ in single_results:
+        s = cand["surah"]
+        if s not in seen:
+            seen.add(s)
+            top_surahs.append(s)
+            if len(top_surahs) >= TOP_SURAHS:
+                break
+
+    span_candidates = []
+    for surah_num in top_surahs:
+        verses = _db.get_surah(surah_num)
+        for start_idx in range(len(verses)):
+            for span_len in range(2, MAX_SPAN + 1):
+                end_idx = start_idx + span_len
+                if end_idx > len(verses):
+                    break
+                chunk = verses[start_idx:end_idx]
+                combined_clean = " ".join(v["text_clean"] for v in chunk)
+                combined_uthmani = " ".join(v["text_uthmani"] for v in chunk)
+                span_candidates.append({
+                    "surah": surah_num,
+                    "ayah": chunk[0]["ayah"],
+                    "ayah_end": chunk[-1]["ayah"],
+                    "text_clean": combined_clean,
+                    "text_uthmani": combined_uthmani,
+                    "text": combined_uthmani,
+                })
+
+    return span_candidates
 
 
 def predict(audio_path: str) -> dict:
@@ -107,46 +152,63 @@ def predict(audio_path: str) -> dict:
     with torch.no_grad():
         logits = _model(**inputs).logits  # (1, T, V)
 
-    # 2. Greedy decode -> rough text for candidate pruning
-    pred_ids = torch.argmax(logits, dim=-1)[0]
-    rough_text = _processor.decode(pred_ids.cpu().numpy())
-    rough_text_normalized = normalize_arabic(rough_text)
+    logits_cpu = logits.cpu()
+    blank_id = _processor.tokenizer.pad_token_id
 
-    if not rough_text_normalized.strip():
+    # 2. Greedy decode -> rough text for Levenshtein pre-filtering
+    pred_ids = torch.argmax(logits_cpu, dim=-1)[0]
+    transcript = normalize_arabic(_processor.decode(pred_ids.numpy()))
+
+    if not transcript.strip():
         return {
             "surah": 0, "ayah": 0, "ayah_end": None,
             "score": 0.0, "transcript": "",
         }
 
-    # 3. Prune: Levenshtein top-K candidates
-    candidates = _db.search(rough_text_normalized, top_k=TOP_K)
+    # 3. Levenshtein pre-filter -> top-K candidates
+    candidates = _levenshtein_candidates(transcript, top_k=TOP_K)
 
-    # 4. CTC re-score each candidate
-    blank_id = _processor.tokenizer.pad_token_id
-    scored = score_candidates(
-        logits.cpu(),
-        candidates,
-        _tokenize_for_ctc,
-        blank_id=blank_id,
+    # 4. CTC re-score candidates (length-normalized)
+    single_results = score_candidates(
+        logits_cpu, candidates, _tokenize_for_ctc, blank_id=blank_id,
     )
 
-    if not scored:
+    if not single_results:
         return {
             "surah": 0, "ayah": 0, "ayah_end": None,
-            "score": 0.0, "transcript": rough_text_normalized,
+            "score": 0.0, "transcript": transcript,
         }
 
-    best_candidate, best_loss = scored[0]
+    # 5. Multi-verse span scoring for top surahs
+    #    Skip if best single-verse score is already confident (saves 10-40s)
+    span_candidates = []
+    if single_results[0][1] >= SKIP_SPAN_THRESHOLD:
+        span_candidates = _build_span_candidates(single_results)
+    if span_candidates:
+        span_results = []
+        for i in range(0, len(span_candidates), CHUNK_SIZE):
+            chunk = span_candidates[i:i + CHUNK_SIZE]
+            scored = score_candidates(
+                logits_cpu, chunk, _tokenize_for_ctc, blank_id=blank_id,
+            )
+            span_results.extend(scored)
+        span_results.sort(key=lambda x: x[1])
+    else:
+        span_results = []
 
-    # Convert normalized CTC loss to 0-1 confidence
-    confidence = math.exp(-best_loss)
+    # 6. Pick best from single + span results
+    best_candidate, best_loss = single_results[0]
+    if span_results and span_results[0][1] < best_loss:
+        best_candidate, best_loss = span_results[0]
+
+    confidence = math.exp(-best_loss) if math.isfinite(best_loss) else 0.0
 
     return {
         "surah": best_candidate["surah"],
         "ayah": best_candidate["ayah"],
         "ayah_end": best_candidate.get("ayah_end"),
         "score": round(confidence, 4),
-        "transcript": rough_text_normalized,
+        "transcript": transcript,
     }
 
 

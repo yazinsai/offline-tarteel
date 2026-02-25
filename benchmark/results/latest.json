@@ -1,23 +1,23 @@
 [
   {
     "name": "ctc-alignment",
-    "recall": 0.733939393939394,
-    "precision": 0.7318181818181818,
-    "sequence_accuracy": 0.6363636363636364,
+    "recall": 0.8121212121212121,
+    "precision": 0.8181818181818182,
+    "sequence_accuracy": 0.8,
     "total": 55,
-    "avg_latency": 0.9121799121452072,
+    "avg_latency": 9.327519536420004,
     "model_size": 1258291200,
-    "timestamp": "2026-02-25_160822"
+    "timestamp": "2026-02-25_231559"
   },
   {
     "name": "tarteel-whisper-base",
-    "recall": 0.7136363636363636,
-    "precision": 0.7090909090909091,
-    "sequence_accuracy": 0.6181818181818182,
+    "recall": 0.7151515151515151,
+    "precision": 0.7454545454545455,
+    "sequence_accuracy": 0.6727272727272727,
     "total": 55,
-    "avg_latency": 1.46615171969011,
+    "avg_latency": 3.109615217472575,
     "model_size": 304087040,
-    "timestamp": "2026-02-25_204846"
+    "timestamp": "2026-02-25_232011"
   },
   {
     "name": "tarteel-whisper-base (stream 5s)",

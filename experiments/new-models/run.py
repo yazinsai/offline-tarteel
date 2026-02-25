@@ -99,9 +99,18 @@ def predict(audio_path: str, model_name: str = "tarteel-whisper-base") -> dict:
     audio = load_audio(audio_path)
 
     with torch.no_grad():
-        if model_type in ("whisper", "moonshine"):
+        if model_type == "whisper":
             inputs = processor(audio, sampling_rate=16000, return_tensors="pt").to(device)
             ids = model.generate(inputs["input_features"], max_new_tokens=225)
+            transcript = processor.batch_decode(ids, skip_special_tokens=True)[0]
+
+        elif model_type == "moonshine":
+            inputs = processor(audio, sampling_rate=16000, return_tensors="pt")
+            inputs = {k: v.to(device) for k, v in inputs.items()}
+            # Token limit to prevent hallucination
+            audio_len = len(audio) / 16000
+            max_tokens = int(audio_len * 13) + 10
+            ids = model.generate(**inputs, max_new_tokens=max_tokens, repetition_penalty=1.2)
             transcript = processor.batch_decode(ids, skip_special_tokens=True)[0]
 
         elif model_type in ("mms", "wav2vec2"):

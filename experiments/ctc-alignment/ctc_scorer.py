@@ -7,6 +7,9 @@ the CTC forward algorithm (via torch.nn.functional.ctc_loss).
 import torch
 import torch.nn.functional as F
 
+# Sentinel score for candidates that can't possibly align
+_IMPOSSIBLE = float("inf")
+
 
 def score_candidates(
     logits: torch.Tensor,
@@ -33,28 +36,41 @@ def score_candidates(
     log_probs = F.log_softmax(logits, dim=-1).permute(1, 0, 2)  # (T, 1, V)
     T = log_probs.size(0)
 
-    # Tokenize all candidates
+    # Tokenize all candidates and filter out those too long for the audio.
+    # CTC requires T >= 2*L+1 (alternating blanks and characters).
     encoded = []
     target_lengths = []
-    for c in candidates:
+    feasible_indices = []
+    for i, c in enumerate(candidates):
         ids = tokenize_fn(c["text_clean"])
         if len(ids) == 0:
-            ids = [blank_id]  # fallback for empty text
+            ids = [blank_id]
+        if len(ids) * 2 + 1 > T:
+            # Target too long for this audio — skip CTC scoring
+            continue
         encoded.append(ids)
         target_lengths.append(len(ids))
+        feasible_indices.append(i)
 
-    N = len(candidates)
-    # Expand log_probs for batch: (T, 1, V) -> (T, N, V)
+    # Build results: infeasible candidates get _IMPOSSIBLE score
+    results = []
+
+    if not encoded:
+        # All candidates are too long for the audio
+        for c in candidates:
+            results.append((c, _IMPOSSIBLE))
+        results.sort(key=lambda x: x[1])
+        return results
+
+    N = len(encoded)
     log_probs_batch = log_probs.expand(T, N, -1).contiguous()
     input_lengths = torch.full((N,), T, dtype=torch.long)
     target_lengths_t = torch.tensor(target_lengths, dtype=torch.long)
 
-    # Concatenate targets (CTC loss accepts 1D concatenated targets)
     all_targets = torch.tensor(
         [idx for seq in encoded for idx in seq], dtype=torch.long
     )
 
-    # Batch CTC scoring
     losses = F.ctc_loss(
         log_probs_batch,
         all_targets,
@@ -62,12 +78,21 @@ def score_candidates(
         target_lengths_t,
         blank=blank_id,
         reduction="none",
-        zero_infinity=True,
+        zero_infinity=False,
     )  # (N,)
 
-    # Normalize by input length to make scores comparable across chunks
-    scores = (losses / T).tolist()
+    # Replace any remaining inf/nan with a large penalty
+    losses = torch.where(
+        torch.isfinite(losses), losses, torch.tensor(1e9)
+    )
 
-    results = list(zip(candidates, scores))
-    results.sort(key=lambda x: x[1])  # lower = better
+    # Normalize by target length to avoid bias toward short verses
+    scores = (losses / target_lengths_t.float()).tolist()
+
+    # Merge feasible scores with infeasible sentinels
+    score_map = {feasible_indices[j]: scores[j] for j in range(N)}
+    for i, c in enumerate(candidates):
+        results.append((c, score_map.get(i, _IMPOSSIBLE)))
+
+    results.sort(key=lambda x: x[1])
     return results
