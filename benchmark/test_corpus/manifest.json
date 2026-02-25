@@ -1,0 +1,11 @@
+{
+  "samples": [
+    {"id": "user_nisa_51", "file": "nisa_51.m4a", "surah": 4, "ayah": 51, "ayah_end": null, "category": "medium", "source": "user"},
+    {"id": "user_ikhlas_2_3", "file": "ikhlas_2_3.m4a", "surah": 112, "ayah": 2, "ayah_end": 3, "category": "multi", "source": "user"},
+    {"id": "ref_001001", "file": "001001.mp3", "surah": 1, "ayah": 1, "ayah_end": null, "category": "medium", "source": "everyayah"},
+    {"id": "ref_001002", "file": "001002.mp3", "surah": 1, "ayah": 2, "ayah_end": null, "category": "medium", "source": "everyayah"},
+    {"id": "ref_002255", "file": "002255.mp3", "surah": 2, "ayah": 255, "ayah_end": null, "category": "long", "source": "everyayah"},
+    {"id": "ref_112001", "file": "112001.mp3", "surah": 112, "ayah": 1, "ayah_end": null, "category": "short", "source": "everyayah"},
+    {"id": "ref_036001", "file": "036001.mp3", "surah": 36, "ayah": 1, "ayah_end": null, "category": "short", "source": "everyayah"}
+  ]
+}
