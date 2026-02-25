@@ -20,6 +20,16 @@
     "timestamp": "2026-02-25_144440"
   },
   {
+    "name": "tarteel-whisper-base (stream 5s)",
+    "recall": 0.7451515151515151,
+    "precision": 0.5834471410941998,
+    "sequence_accuracy": 0.45454545454545453,
+    "total": 55,
+    "avg_latency": 2.3930483976360515,
+    "model_size": 304087040,
+    "timestamp": "2026-02-25_151044"
+  },
+  {
     "name": "whisper-lora",
     "recall": 0.643939393939394,
     "precision": 0.6545454545454545,
