@@ -1,12 +1,12 @@
 [
   {
     "name": "ctc-alignment",
-    "accuracy": 0.40540540540540543,
-    "correct": 15,
+    "accuracy": 0.8108108108108109,
+    "correct": 30,
     "total": 37,
-    "avg_latency": 0.24200652581262025,
+    "avg_latency": 0.2465774212453382,
     "model_size": 1258291200,
-    "timestamp": "2026-02-25_132106"
+    "timestamp": "2026-02-25_132442"
   },
   {
     "name": "tarteel-whisper-base",

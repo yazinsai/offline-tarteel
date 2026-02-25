@@ -104,9 +104,7 @@ def predict(audio_path: str) -> dict:
         }
 
     # 3. Prune: Levenshtein top-K candidates
-    # Fine-tuned CTC model may not produce word delimiters, so match
-    # spaceless text against spaceless verses for better pruning.
-    candidates = _spaceless_search(rough_text_normalized, top_k=TOP_K)
+    candidates = _db.search(rough_text_normalized, top_k=TOP_K)
 
     # 4. CTC re-score each candidate
     blank_id = _processor.tokenizer.pad_token_id

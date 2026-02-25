@@ -1,13 +1,16 @@
 """
-Train wav2vec2 CTC model on Quran audio (Modal A10G).
+Fine-tune jonatasgrosman/wav2vec2-large-xlsr-53-arabic on Quran audio (Modal A10G).
 
-Base model: facebook/wav2vec2-xls-r-300m
+This model already hits 81% on our benchmark. Fine-tuning on Quran-specific
+recitations should improve accuracy on tajweed patterns and short verses.
+
 Dataset: Buraaq/quran-md-ayahs (187K samples, 30 reciters)
-Approach: Freeze CNN feature extractor, fine-tune transformer + CTC head
-          with custom Arabic vocabulary (normalized, no diacritics).
+Approach: Freeze CNN feature extractor, fine-tune transformer + existing CTC head
+          with the model's native 51-token Arabic vocabulary.
 
 Usage:
-    modal run scripts/train_ctc_modal.py
+    modal run scripts/train_ctc_modal.py                  # train + download
+    modal run scripts/train_ctc_modal.py --download-only  # just download
 """
 import modal
 
@@ -28,24 +31,18 @@ image = (
     )
 )
 
-vol = modal.Volume.from_name("wav2vec2-quran-ctc", create_if_missing=True)
+vol = modal.Volume.from_name("wav2vec2-quran-ctc-v2", create_if_missing=True)
 
-# Arabic characters after normalization (shared.normalizer compatible)
-VOCAB_CHARS = list("ابتثجحخدذرزسشصضطظعغفقكلمنهويء ")
-# Build vocab: <pad>=0, <s>=1, </s>=2, <unk>=3, | (word boundary)=4, then chars
-VOCAB = {"<pad>": 0, "<s>": 1, "</s>": 2, "<unk>": 3, "|": 4}
-for i, c in enumerate(VOCAB_CHARS):
-    VOCAB[c] = i + 5
+BASE_MODEL = "jonatasgrosman/wav2vec2-large-xlsr-53-arabic"
 
 
 @app.function(
     image=image,
     gpu="A10G",
-    timeout=10800,  # 3 hours
+    timeout=21600,  # 6 hours
     volumes={"/training": vol},
 )
 def train():
-    import json
     import re
     import torch
     from pathlib import Path
@@ -54,8 +51,6 @@ def train():
     from datasets import load_dataset, Audio
     from transformers import (
         Wav2Vec2ForCTC,
-        Wav2Vec2CTCTokenizer,
-        Wav2Vec2FeatureExtractor,
         Wav2Vec2Processor,
         TrainingArguments,
         Trainer,
@@ -68,73 +63,42 @@ def train():
     if torch.cuda.is_available():
         print(f"GPU: {torch.cuda.get_device_name(0)}")
 
-    # -- Build vocab + tokenizer --
-    vocab_path = Path("/tmp/vocab.json")
-    vocab_path.write_text(json.dumps(VOCAB))
-
-    tokenizer = Wav2Vec2CTCTokenizer(
-        str(vocab_path),
-        unk_token="<unk>",
-        pad_token="<pad>",
-        word_delimiter_token="|",
-    )
-
-    feature_extractor = Wav2Vec2FeatureExtractor(
-        feature_size=1,
-        sampling_rate=16000,
-        padding_value=0.0,
-        do_normalize=True,
-        return_attention_mask=True,
-    )
-
-    processor = Wav2Vec2Processor(
-        feature_extractor=feature_extractor,
-        tokenizer=tokenizer,
-    )
-
-    # -- Load model --
-    print("Loading wav2vec2-xls-r-300m...")
+    # -- Load processor + model (already has Arabic CTC head) --
+    print(f"Loading {BASE_MODEL}...")
+    processor = Wav2Vec2Processor.from_pretrained(BASE_MODEL)
     model = Wav2Vec2ForCTC.from_pretrained(
-        "facebook/wav2vec2-xls-r-300m",
-        attention_dropout=0.1,
-        hidden_dropout=0.1,
+        BASE_MODEL,
+        attention_dropout=0.05,
+        hidden_dropout=0.05,
         feat_proj_dropout=0.0,
         mask_time_prob=0.05,
-        layerdrop=0.1,
+        layerdrop=0.05,
         ctc_loss_reduction="mean",
-        pad_token_id=tokenizer.pad_token_id,
-        vocab_size=len(tokenizer),
         ctc_zero_infinity=True,
     )
 
-    # Freeze feature extractor (CNN layers)
+    # Freeze feature extractor (CNN layers) — only fine-tune transformer + CTC head
     model.freeze_feature_encoder()
 
-    # -- Arabic normalization (matches shared.normalizer) --
+    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    total = sum(p.numel() for p in model.parameters())
+    print(f"Parameters: {total/1e6:.0f}M total, {trainable/1e6:.0f}M trainable")
+
+    # -- Diacritic stripping (keep character forms as-is for model's native vocab) --
     _DIACRITICS = re.compile(
         '[\u0610-\u061A\u064B-\u065F\u0670\u06D6-\u06DC'
         '\u06DF-\u06E4\u06E7\u06E8\u06EA-\u06ED\u0640]'
     )
-    _NORM_MAP = str.maketrans({
-        '\u0623': '\u0627',  # أ -> ا
-        '\u0625': '\u0627',  # إ -> ا
-        '\u0622': '\u0627',  # آ -> ا
-        '\u0671': '\u0627',  # ٱ -> ا
-        '\u0629': '\u0647',  # ة -> ه
-        '\u0649': '\u064A',  # ى -> ي
-    })
 
-    def normalize_arabic(text):
+    def strip_diacritics(text):
+        """Strip diacritics only. Don't normalize alef/taa marbuta —
+        the model's vocab has separate tokens for those."""
         text = _DIACRITICS.sub('', text)
-        text = text.translate(_NORM_MAP)
-        text = ' '.join(text.split())
-        return text
+        return ' '.join(text.split())
 
     # -- Load dataset --
     print("Loading Buraaq/quran-md-ayahs...")
     ds = load_dataset("Buraaq/quran-md-ayahs", split="train", streaming=True)
-    # Disable auto-decode — soundfile can't handle all audio formats in this dataset.
-    # We'll decode manually with torchaudio (which uses ffmpeg) in the prepare function.
     ds = ds.cast_column("audio", Audio(decode=False))
 
     # Hold out 3 reciters for validation
@@ -144,26 +108,16 @@ def train():
         "hani_ar_rifai",
     }
 
-    def is_train(example):
-        return example["reciter_id"] not in VAL_RECITERS
-
-    def is_val(example):
-        return example["reciter_id"] in VAL_RECITERS
-
-    train_ds = ds.filter(is_train)
-    # For val, take a finite subset (streaming dataset)
-    val_ds = ds.filter(is_val).take(2000)
+    train_ds = ds.filter(lambda x: x["reciter_id"] not in VAL_RECITERS)
 
     _skip_count = [0]
 
     def prepare(batch):
         import io
         import librosa
-        import numpy as np
 
         try:
-            # Decode audio with librosa (handles mp3 via audioread/ffmpeg)
-            audio_data = batch["audio"]  # dict with 'bytes' and 'path'
+            audio_data = batch["audio"]
             audio_bytes = audio_data["bytes"]
             audio_array, _ = librosa.load(
                 io.BytesIO(audio_bytes), sr=16000, mono=True
@@ -179,11 +133,9 @@ def train():
                 return_tensors=None,
             ).input_values[0]
 
-            # Normalize Arabic text (strip diacritics, normalize chars)
-            text = normalize_arabic(batch["ayah_ar"])
-            # Replace spaces with word delimiter for CTC
-            text_with_delim = text.replace(" ", "|")
-            labels = processor.tokenizer(text_with_delim).input_ids
+            # Strip diacritics but keep character forms for model's vocab
+            text = strip_diacritics(batch["ayah_ar"])
+            labels = processor.tokenizer(text).input_ids
 
             if len(labels) == 0:
                 raise ValueError("Empty label sequence")
@@ -231,12 +183,13 @@ def train():
         output_dir=str(CHECKPOINT_DIR),
         per_device_train_batch_size=4,
         gradient_accumulation_steps=8,
-        learning_rate=3e-5,
-        warmup_steps=500,
-        max_steps=5000,
+        learning_rate=1e-5,  # lower LR for fine-tuning (not from scratch)
+        warmup_steps=100,
+        max_steps=2000,
         fp16=True,
-        logging_steps=50,
-        save_steps=1000,
+        logging_steps=25,
+        save_steps=500,
+        save_total_limit=3,
         remove_unused_columns=False,
         dataloader_pin_memory=True,
         report_to="none",
@@ -251,14 +204,14 @@ def train():
     )
 
     print("\n" + "=" * 60)
-    print("  Starting CTC training (5000 steps on A10G)")
-    print("  Base: wav2vec2-xls-r-300m")
+    print(f"  Fine-tuning {BASE_MODEL}")
+    print("  2000 steps on A10G, lr=1e-5")
     print("  Dataset: Buraaq/quran-md-ayahs (30 reciters)")
     print("=" * 60 + "\n")
 
     trainer.train()
 
-    # -- Save --
+    # -- Save with save_pretrained (includes tokenizer + config) --
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     print(f"\nSaving model to {OUTPUT_DIR}...")
     model.save_pretrained(str(OUTPUT_DIR))
@@ -273,10 +226,8 @@ def download_model():
 
     vol.reload()
 
-    # Try final model first, then fall back to latest checkpoint
     model_dir = Path("/training/ctc-model")
     if not model_dir.exists():
-        # Find latest checkpoint
         ckpt_dir = Path("/training/ctc-checkpoints")
         if ckpt_dir.exists():
             checkpoints = sorted(ckpt_dir.glob("checkpoint-*"))
@@ -284,16 +235,20 @@ def download_model():
                 model_dir = checkpoints[-1]
                 print(f"No final model found, using checkpoint: {model_dir.name}")
             else:
-                print("No checkpoints found! Run training first.")
+                print("No checkpoints found!")
                 return {}
         else:
-            print("No training output found! Run training first.")
+            print("No training output found!")
             return {}
 
     print(f"Downloading from {model_dir}...")
     files = {}
     for f in model_dir.rglob("*"):
         if f.is_file():
+            # Skip optimizer/training state (large, not needed for inference)
+            if f.name in ("optimizer.pt", "rng_state.pth", "scaler.pt",
+                          "scheduler.pt", "training_args.bin"):
+                continue
             rel = str(f.relative_to(model_dir))
             files[rel] = f.read_bytes()
             size_mb = len(files[rel]) / (1024 * 1024)
@@ -306,7 +261,7 @@ def main(download_only: bool = False):
     from pathlib import Path
 
     if not download_only:
-        print("Starting CTC training on Modal GPU...")
+        print("Starting fine-tuning on Modal GPU...")
         train.remote()
 
     print("\nDownloading model...")

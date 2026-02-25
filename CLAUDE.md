@@ -118,10 +118,11 @@ Results go to `benchmark/results/<timestamp>.json`.
 
 ## Test Corpus
 
-`benchmark/test_corpus/manifest.json` — 37 samples:
-- 7 baseline (2 user recordings + 5 EveryAyah reference)
+`benchmark/test_corpus/manifest.json` — 55 samples:
+- 2 user recordings (.m4a)
+- 23 EveryAyah reference (Alafasy, includes 8 long single-ayah + 8 multi-ayah concatenated)
 - 30 RetaSy crowdsourced (curated via `benchmark/curate_corpus.py`)
-- Categories: short (1-5 words), medium (6-15), long (15+), multi (multi-ayah)
+- Categories: short (17), medium (20), long (9), multi (9)
 
 ## Current Experiments
 
