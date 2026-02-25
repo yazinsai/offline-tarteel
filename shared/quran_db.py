@@ -31,6 +31,17 @@ class QuranDB:
     def get_surah(self, surah: int):
         return self._by_surah.get(surah, [])
 
+    def get_next_verse(self, surah: int, ayah: int) -> dict | None:
+        """Return the next verse after surah:ayah, or None if last verse."""
+        verses = self._by_surah.get(surah, [])
+        for i, v in enumerate(verses):
+            if v["ayah"] == ayah:
+                if i + 1 < len(verses):
+                    return verses[i + 1]
+                next_surah = self._by_surah.get(surah + 1, [])
+                return next_surah[0] if next_surah else None
+        return None
+
     def search(self, text: str, top_k: int = 5) -> list[dict]:
         text = normalize_arabic(text)
         scored = []
