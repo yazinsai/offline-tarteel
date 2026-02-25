@@ -11,23 +11,23 @@
   },
   {
     "name": "tarteel-whisper-base",
-    "recall": 0.7181818181818181,
-    "precision": 0.7151515151515152,
+    "recall": 0.7136363636363636,
+    "precision": 0.7090909090909091,
     "sequence_accuracy": 0.6181818181818182,
     "total": 55,
-    "avg_latency": 1.5842765878362115,
+    "avg_latency": 1.46615171969011,
     "model_size": 304087040,
-    "timestamp": "2026-02-25_144440"
+    "timestamp": "2026-02-25_204846"
   },
   {
     "name": "tarteel-whisper-base (stream 5s)",
     "recall": 0.7451515151515151,
-    "precision": 0.5834471410941998,
-    "sequence_accuracy": 0.45454545454545453,
+    "precision": 0.6136965811965811,
+    "sequence_accuracy": 0.4909090909090909,
     "total": 55,
-    "avg_latency": 2.3930483976360515,
+    "avg_latency": 2.267034340052421,
     "model_size": 304087040,
-    "timestamp": "2026-02-25_151044"
+    "timestamp": "2026-02-25_204636"
   },
   {
     "name": "whisper-lora",
