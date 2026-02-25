@@ -1,5 +1,5 @@
 """
-Benchmark runner for all experiments.
+Benchmark runner for all experiments — streaming sequence evaluation.
 
 Usage:
     python -m benchmark.runner                           # all experiments
@@ -18,11 +18,13 @@ from datetime import datetime
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from shared.streaming import StreamingPipeline
+from shared.quran_db import QuranDB
+
 EXPERIMENTS_DIR = PROJECT_ROOT / "experiments"
 CORPUS_DIR = Path(__file__).parent / "test_corpus"
 RESULTS_DIR = Path(__file__).parent / "results"
 
-# Experiments and their run.py paths
 EXPERIMENT_REGISTRY = {
     "whisper-lora": EXPERIMENTS_DIR / "whisper-lora" / "run.py",
     "embedding-search": EXPERIMENTS_DIR / "embedding-search" / "run.py",
@@ -50,8 +52,50 @@ def load_manifest() -> list[dict]:
     return data["samples"]
 
 
+def score_sequence(expected: list[dict], predicted: list[dict]) -> dict:
+    """Score a predicted verse sequence against expected.
+
+    Uses ordered subsequence matching: a predicted verse counts as a
+    recall hit if it matches an expected verse and appears in the
+    correct relative order.
+
+    Args:
+        expected: [{"surah": int, "ayah": int}, ...]
+        predicted: [{"surah": int, "ayah": int, ...}, ...]
+
+    Returns:
+        {"recall": float, "precision": float, "sequence_accuracy": float}
+    """
+    if not expected:
+        return {"recall": 1.0, "precision": 1.0, "sequence_accuracy": 1.0}
+
+    if not predicted:
+        return {"recall": 0.0, "precision": 0.0, "sequence_accuracy": 0.0}
+
+    # Greedy ordered match: walk through expected, find each in predicted (in order)
+    pred_tuples = [(p["surah"], p["ayah"]) for p in predicted]
+    exp_tuples = [(e["surah"], e["ayah"]) for e in expected]
+
+    matched = 0
+    pred_idx = 0
+    matched_pred_indices = set()
+    for exp in exp_tuples:
+        for j in range(pred_idx, len(pred_tuples)):
+            if pred_tuples[j] == exp:
+                matched += 1
+                matched_pred_indices.add(j)
+                pred_idx = j + 1
+                break
+
+    recall = matched / len(exp_tuples)
+    precision = len(matched_pred_indices) / len(pred_tuples)
+    seq_acc = 1.0 if pred_tuples == exp_tuples else 0.0
+
+    return {"recall": recall, "precision": precision, "sequence_accuracy": seq_acc}
+
+
 def discover_experiments(filter_name: str | None = None) -> list[dict]:
-    """Return list of {name, module_path, model_name (optional)}."""
+    """Return list of {name, run_path, model_name (optional)}."""
     experiments = []
 
     for name, run_path in EXPERIMENT_REGISTRY.items():
@@ -81,18 +125,24 @@ def discover_experiments(filter_name: str | None = None) -> list[dict]:
     return experiments
 
 
-def run_experiment(exp: dict, samples: list[dict]) -> dict:
-    """Run one experiment against all samples. Returns results dict."""
+def run_experiment(exp: dict, samples: list[dict], pipeline: StreamingPipeline) -> dict | None:
+    """Run one experiment against all samples using streaming evaluation."""
     mod = _load_module(exp["name"].replace("/", "_").replace("-", "_"), exp["run_path"])
 
-    # Warmup call
+    if not hasattr(mod, "transcribe"):
+        print(f"  Skipping {exp['name']} — no transcribe() function")
+        return None
+
+    transcribe_fn = mod.transcribe
+    if exp["model_name"]:
+        base_fn = transcribe_fn
+        transcribe_fn = lambda path, _mn=exp["model_name"]: base_fn(path, model_name=_mn)
+
+    # Warmup
     warmup_sample = samples[0]
     audio_path = str(CORPUS_DIR / warmup_sample["file"])
     try:
-        if exp["model_name"]:
-            mod.predict(audio_path, model_name=exp["model_name"])
-        else:
-            mod.predict(audio_path)
+        transcribe_fn(audio_path)
     except Exception as e:
         print(f"  Warmup failed for {exp['name']}: {e}")
 
@@ -105,47 +155,50 @@ def run_experiment(exp: dict, samples: list[dict]) -> dict:
     except Exception:
         size = 0
 
-    correct = 0
-    total = len(samples)
+    total_recall = 0.0
+    total_precision = 0.0
+    total_seq_acc = 0.0
     latencies = []
     per_sample = []
 
     for sample in samples:
         audio_path = str(CORPUS_DIR / sample["file"])
+        expected = sample.get("expected_verses", [{"surah": sample["surah"], "ayah": sample["ayah"]}])
+
         try:
             start = time.perf_counter()
-            if exp["model_name"]:
-                result = mod.predict(audio_path, model_name=exp["model_name"])
-            else:
-                result = mod.predict(audio_path)
+            emissions = pipeline.run_on_full_transcript(audio_path, transcribe_fn)
             elapsed = time.perf_counter() - start
         except Exception as e:
-            result = {"surah": 0, "ayah": 0, "ayah_end": None, "score": 0.0, "transcript": f"ERROR: {e}"}
+            print(f"  Error on {sample['id']}: {e}")
+            emissions = []
             elapsed = 0.0
 
-        expected = (sample["surah"], sample["ayah"], sample.get("ayah_end"))
-        predicted = (result["surah"], result["ayah"], result.get("ayah_end"))
-        is_correct = expected == predicted
-
-        if is_correct:
-            correct += 1
+        scores = score_sequence(expected, emissions)
+        total_recall += scores["recall"]
+        total_precision += scores["precision"]
+        total_seq_acc += scores["sequence_accuracy"]
         latencies.append(elapsed)
 
         per_sample.append({
             "id": sample["id"],
-            "expected": {"surah": sample["surah"], "ayah": sample["ayah"], "ayah_end": sample.get("ayah_end")},
-            "predicted": result,
-            "correct": is_correct,
+            "expected": expected,
+            "predicted": emissions,
+            "recall": scores["recall"],
+            "precision": scores["precision"],
+            "sequence_accuracy": scores["sequence_accuracy"],
             "latency": elapsed,
         })
 
-    avg_latency = sum(latencies) / len(latencies) if latencies else 0
+    n = len(samples)
+    avg_latency = sum(latencies) / n if n else 0
 
     return {
         "name": exp["name"],
-        "accuracy": correct / total if total > 0 else 0,
-        "correct": correct,
-        "total": total,
+        "recall": total_recall / n if n else 0,
+        "precision": total_precision / n if n else 0,
+        "sequence_accuracy": total_seq_acc / n if n else 0,
+        "total": n,
         "avg_latency": avg_latency,
         "model_size": size,
         "per_sample": per_sample,
@@ -160,13 +213,15 @@ def format_size(size_bytes: int) -> str:
 
 def print_table(results: list[dict]):
     print()
-    print(f"{'Experiment':<30} {'Accuracy':>12} {'Latency':>10} {'Model Size':>12}")
-    print("-" * 66)
+    print(f"{'Experiment':<30} {'Recall':>8} {'Precision':>10} {'SeqAcc':>8} {'Latency':>10} {'Size':>10}")
+    print("-" * 78)
     for r in results:
-        acc = f"{r['accuracy']:.0%} ({r['correct']}/{r['total']})"
+        rec = f"{r['recall']:.0%}"
+        prec = f"{r['precision']:.0%}"
+        seq = f"{r['sequence_accuracy']:.0%}"
         lat = f"{r['avg_latency']:.2f}s"
         size = format_size(r['model_size'])
-        print(f"{r['name']:<30} {acc:>12} {lat:>10} {size:>12}")
+        print(f"{r['name']:<30} {rec:>8} {prec:>10} {seq:>8} {lat:>10} {size:>10}")
     print()
 
 
@@ -178,7 +233,6 @@ def save_results(results: list[dict]):
         json.dump(results, f, indent=2, default=str)
     print(f"Results saved to {path}")
 
-    # Update latest.json — merge new results with existing best-per-experiment
     latest_path = RESULTS_DIR / "latest.json"
     if latest_path.exists():
         with open(latest_path) as f:
@@ -189,17 +243,18 @@ def save_results(results: list[dict]):
     for r in results:
         summary = {
             "name": r["name"],
-            "accuracy": r["accuracy"],
-            "correct": r["correct"],
+            "recall": r["recall"],
+            "precision": r["precision"],
+            "sequence_accuracy": r["sequence_accuracy"],
             "total": r["total"],
             "avg_latency": r["avg_latency"],
             "model_size": r["model_size"],
             "timestamp": timestamp,
         }
-        # Keep the better result (higher accuracy, or same accuracy but lower latency)
         prev = latest.get(r["name"])
-        if prev is None or r["accuracy"] > prev["accuracy"] or (
-            r["accuracy"] == prev["accuracy"] and r["avg_latency"] < prev.get("avg_latency", float("inf"))
+        if prev is None or r["sequence_accuracy"] > prev.get("sequence_accuracy", 0) or (
+            r["sequence_accuracy"] == prev.get("sequence_accuracy", 0)
+            and r["avg_latency"] < prev.get("avg_latency", float("inf"))
         ):
             latest[r["name"]] = summary
 
@@ -209,7 +264,7 @@ def save_results(results: list[dict]):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Benchmark all experiments")
+    parser = argparse.ArgumentParser(description="Benchmark all experiments (streaming)")
     parser.add_argument("--experiment", type=str, help="Run only this experiment")
     parser.add_argument("--category", type=str, help="Filter samples by category")
     args = parser.parse_args()
@@ -224,14 +279,19 @@ def main():
         print(f"No experiments found matching '{args.experiment}'")
         return
 
+    db = QuranDB()
+    pipeline = StreamingPipeline(db=db)
+
     print(f"Running {len(experiments)} experiment(s) on {len(samples)} sample(s)...")
 
     results = []
     for exp in experiments:
         print(f"\n>>> {exp['name']}")
-        result = run_experiment(exp, samples)
+        result = run_experiment(exp, samples, pipeline)
+        if result is None:
+            continue
         results.append(result)
-        print(f"    Accuracy: {result['accuracy']:.0%} ({result['correct']}/{result['total']})")
+        print(f"    Recall: {result['recall']:.0%}  Precision: {result['precision']:.0%}  SeqAcc: {result['sequence_accuracy']:.0%}")
 
     print_table(results)
     save_results(results)
