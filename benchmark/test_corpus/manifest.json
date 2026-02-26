@@ -1,17 +1,17 @@
 {
   "samples": [
     {
-      "id": "user_nisa_51",
+      "id": "user_imran_23",
       "file": "nisa_51.m4a",
-      "surah": 4,
-      "ayah": 51,
+      "surah": 3,
+      "ayah": 23,
       "ayah_end": null,
       "category": "medium",
       "source": "user",
       "expected_verses": [
         {
-          "surah": 4,
-          "ayah": 51
+          "surah": 3,
+          "ayah": 23
         }
       ]
     },
@@ -526,21 +526,6 @@
         {
           "surah": 111,
           "ayah": 2
-        }
-      ]
-    },
-    {
-      "id": "retasy_028",
-      "file": "retasy_028.wav",
-      "surah": 42,
-      "ayah": 4,
-      "ayah_end": null,
-      "category": "medium",
-      "source": "retasy",
-      "expected_verses": [
-        {
-          "surah": 42,
-          "ayah": 4
         }
       ]
     },

@@ -9,7 +9,7 @@ shared/              # Common utilities (audio, normalizer, quran_db)
 experiments/         # Each approach gets its own directory with a run.py
 benchmark/           # Runner, test corpus, results
   runner.py          # CLI: python -m benchmark.runner
-  test_corpus/       # Audio files + manifest.json (37 samples)
+  test_corpus/       # Audio files + manifest.json (54 samples)
   results/           # Timestamped JSON output
 data/                # quran.json, reference audio, LoRA adapters
 src/offline_tarteel/ # Legacy package (kept for compatibility)
@@ -120,7 +120,7 @@ Results go to `benchmark/results/<timestamp>.json`.
 
 ### Scoring
 
-The benchmark uses **streaming sequence evaluation**. Each experiment's `transcribe()` output is fed through `VerseTracker` which emits an ordered sequence of `(surah, ayah)` detections. Metrics:
+The benchmark uses **sequence evaluation**. Experiments with `predict()` are called directly; others use `transcribe()` + `VerseTracker`. Metrics:
 
 - **Recall**: fraction of expected verses detected in the correct order
 - **Precision**: fraction of predicted verses that are correct
@@ -138,19 +138,19 @@ def model_size() -> int:                  # model size in bytes
 
 ## Test Corpus
 
-`benchmark/test_corpus/manifest.json` — 55 samples:
+`benchmark/test_corpus/manifest.json` — 54 samples:
 - 2 user recordings (.m4a)
-- 23 EveryAyah reference (Alafasy, includes 8 long single-ayah + 8 multi-ayah concatenated)
-- 30 RetaSy crowdsourced (curated via `benchmark/curate_corpus.py`)
-- Categories: short (17), medium (20), long (9), multi (9)
+- 23 EveryAyah reference (Alafasy, includes 8 long single-ayah + 9 multi-ayah concatenated)
+- 29 RetaSy crowdsourced (curated via `benchmark/curate_corpus.py`)
+- Categories: short (17), medium (19), long (9), multi (9)
 
 ## Current Experiments
 
-| Experiment | Approach | Recall | Precision | SeqAcc | Latency | Size |
+| Experiment | Approach | SeqAcc | Recall | Precision | Latency | Size |
 |---|---|---|---|---|---|---|
-| tarteel-whisper-base | tarteel-ai/whisper-base-ar-quran | 72% | 72% | 62% | ~1.6s | 290 MB |
-| whisper-lora | Whisper-small + LoRA | 64% | 65% | 58% | ~1.3s | 485 MB |
-| ctc-alignment | Arabic CTC wav2vec2 | 69% | 65% | 56% | ~1.0s | 1.2 GB |
+| ctc-alignment | wav2vec2 CTC forced alignment (fine-tuned) | **81%** | 83% | 83% | ~5s | 1.2 GB |
+| tarteel-whisper-base | tarteel-ai/whisper-base-ar-quran | 67% | 72% | 75% | ~3s | 290 MB |
+| whisper-lora | Whisper-small + LoRA | 58% | 64% | 65% | ~1.3s | 485 MB |
 | embedding-search | HuBERT → FAISS index | — | — | — | — | — |
 | contrastive | QuranCLAP (HuBERT+AraBERT) | — | — | — | — | — |
 | streaming-asr | mlx-whisper chunked | — | — | — | — | — |

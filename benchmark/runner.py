@@ -33,6 +33,9 @@ EXPERIMENT_REGISTRY = {
     "streaming-asr": EXPERIMENTS_DIR / "streaming-asr" / "run.py",
     "ctc-alignment": EXPERIMENTS_DIR / "ctc-alignment" / "run.py",
     "tarteel-whisper-base": EXPERIMENTS_DIR / "tarteel-whisper-base" / "run.py",
+    "two-stage": EXPERIMENTS_DIR / "two-stage" / "run.py",
+    "distilled-ctc": EXPERIMENTS_DIR / "distilled-ctc" / "run.py",
+    "contrastive-v2": EXPERIMENTS_DIR / "contrastive-v2" / "run.py",
 }
 
 NEW_MODELS_PATH = EXPERIMENTS_DIR / "new-models" / "run.py"

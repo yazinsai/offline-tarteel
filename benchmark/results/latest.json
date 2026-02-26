@@ -1,13 +1,33 @@
 [
   {
     "name": "ctc-alignment",
-    "recall": 0.8121212121212121,
-    "precision": 0.8181818181818182,
-    "sequence_accuracy": 0.8,
-    "total": 55,
-    "avg_latency": 9.327519536420004,
+    "recall": 0.8271604938271605,
+    "precision": 0.8333333333333334,
+    "sequence_accuracy": 0.8148148148148148,
+    "total": 54,
+    "avg_latency": 5.138688750759415,
     "model_size": 1258291200,
-    "timestamp": "2026-02-25_231559"
+    "timestamp": "2026-02-26_055928"
+  },
+  {
+    "name": "moonshine-lora",
+    "recall": 0.383030303030303,
+    "precision": 0.4,
+    "sequence_accuracy": 0.36363636363636365,
+    "total": 55,
+    "avg_latency": 1.4656485341270375,
+    "model_size": 113118838,
+    "timestamp": "2026-02-26_053910"
+  },
+  {
+    "name": "new-models/moonshine-tiny-arabic",
+    "recall": 0.5879629629629629,
+    "precision": 0.6111111111111112,
+    "sequence_accuracy": 0.5555555555555556,
+    "total": 54,
+    "avg_latency": 0.6072332971294533,
+    "model_size": 108003328,
+    "timestamp": "2026-02-26_062903"
   },
   {
     "name": "tarteel-whisper-base",

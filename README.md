@@ -6,15 +6,15 @@ This repo is a research workbench for evaluating different approaches to the pro
 
 ## Current results
 
-Benchmarked on 37 samples (user recordings, professional reference audio, crowdsourced recordings). Results from `benchmark/results/latest.json`:
+Benchmarked on 54 samples (user recordings, professional reference audio, crowdsourced recordings). Results from `benchmark/results/latest.json`:
 
-| Experiment | Approach | Accuracy | Avg Latency | Model Size |
-|---|---|---|---|---|
-| **ctc-alignment** | wav2vec2 CTC forced alignment + QuranDB re-scoring | **81%** (30/37) | 0.25s | 1.2 GB |
-| whisper-lora | Whisper-small + LoRA fine-tune + QuranDB match | 78% (29/37) | 0.96s | 485 MB |
-| tarteel-whisper-base | tarteel-ai/whisper-base-ar-quran + QuranDB match | 78% (29/37) | 1.04s | 290 MB |
+| Experiment | Approach | SeqAcc | Recall | Precision | Latency | Size |
+|---|---|---|---|---|---|---|
+| **ctc-alignment** | wav2vec2 CTC forced alignment (fine-tuned) | **81%** | **83%** | **83%** | ~5s | 1.2 GB |
+| tarteel-whisper-base | tarteel-ai/whisper-base-ar-quran + QuranDB | 67% | 72% | 75% | ~3s | 290 MB |
+| whisper-lora | Whisper-small + LoRA fine-tune + QuranDB | 58% | 64% | 65% | ~1.3s | 485 MB |
 
-Other experiments (embedding-search, contrastive, streaming-asr, new-models) have been evaluated qualitatively but aren't yet wired into the benchmark runner with the full 37-sample corpus. See [Experiments](#experiments) below.
+Other experiments (embedding-search, contrastive, streaming-asr, new-models) have been evaluated qualitatively but aren't yet wired into the benchmark runner with the full corpus. See [Experiments](#experiments) below.
 
 ## Project structure
 
@@ -35,7 +35,7 @@ experiments/             # Each approach gets its own directory
 
 benchmark/               # Evaluation framework
   runner.py              # CLI benchmark runner
-  test_corpus/           # 37 audio samples + manifest.json
+  test_corpus/           # 54 audio samples + manifest.json
   results/               # Timestamped JSON results + latest.json
 
 data/                    # Reference data
@@ -63,18 +63,19 @@ RESEARCH-audio-to-verse.md  # Research notes on approaches
 
 CTC forced alignment using a pre-trained Arabic wav2vec2 model. Instead of decoding to text and then matching, this approach scores candidate verses directly against the model's frame-level character logits using the CTC forward algorithm.
 
-**Flow:** audio -> wav2vec2 frame logits -> greedy decode for candidate pruning -> top-K candidates from QuranDB -> CTC re-score each candidate -> best score wins
+**Flow:** audio -> wav2vec2 frame logits -> greedy decode -> Levenshtein top-100 candidates -> length-normalized CTC re-score -> multi-verse span scoring for top surahs -> best score wins
 
-- **Accuracy:** 81% (30/37)
-- **Latency:** ~0.25s
-- **Model:** `jonatasgrosman/wav2vec2-large-xlsr-53-arabic` (1.2 GB)
+- **Seq Accuracy:** 81% (44/54)
+- **Recall / Precision:** 83% / 83%
+- **Latency:** ~5s (median 0.9s for single-verse)
+- **Model:** `jonatasgrosman/wav2vec2-large-xlsr-53-arabic` fine-tuned on Buraaq/quran-md-ayahs (1.2 GB)
 
 ### whisper-lora
 
 Whisper-small fine-tuned with a LoRA adapter on Quranic audio (EveryAyah + RetaSy datasets). Transcribes audio to Arabic text, then fuzzy-matches against QuranDB.
 
-- **Accuracy:** 78% (29/37)
-- **Latency:** ~0.96s
+- **Seq Accuracy:** 58%
+- **Latency:** ~1.3s
 - **Model:** openai/whisper-small (461 MB) + LoRA adapter (21 MB)
 - **Training:** 3,000 steps on A10G GPU (Modal), ~53 minutes
 
@@ -82,8 +83,8 @@ Whisper-small fine-tuned with a LoRA adapter on Quranic audio (EveryAyah + RetaS
 
 Tarteel's Whisper-base model fine-tuned specifically for Quranic Arabic. Same transcribe-then-match pipeline as whisper-lora but using a purpose-built model.
 
-- **Accuracy:** 78% (29/37)
-- **Latency:** ~1.04s
+- **Seq Accuracy:** 67%
+- **Latency:** ~3s
 - **Model:** `tarteel-ai/whisper-base-ar-quran` (290 MB)
 
 ### embedding-search
@@ -128,15 +129,15 @@ Moonshine Tiny Arabic is the efficiency winner -- 30x smaller than Whisper-turbo
 
 ## Test corpus
 
-`benchmark/test_corpus/manifest.json` contains 37 samples across three sources:
+`benchmark/test_corpus/manifest.json` contains 54 samples across three sources:
 
 | Source | Count | Description |
 |---|---|---|
 | User recordings | 2 | Phone recordings (.m4a), ambient noise, non-professional |
 | EveryAyah (Alafasy) | 23 | Professional studio recordings, includes long single-ayah and multi-ayah concatenated |
-| RetaSy crowdsourced | 30 | Curated subset from 1,287 speakers across 81 countries |
+| RetaSy crowdsourced | 29 | Curated subset from 1,287 speakers across 81 countries |
 
-**Categories:** short (17), medium (20), long (9), multi (9). Some samples span multiple categories.
+**Categories:** short (17), medium (19), long (9), multi (9).
 
 ## Running benchmarks
 
@@ -213,7 +214,7 @@ Some experiments have additional dependencies (faiss-cpu, moonshine, mlx-whisper
 
 ## Key findings
 
-1. **CTC forced alignment is the best approach so far** -- scoring candidates directly against frame logits avoids the information loss of greedy decoding, giving 81% accuracy at 0.25s latency.
+1. **CTC forced alignment is the best approach so far** -- scoring candidates directly against frame logits avoids the information loss of greedy decoding, giving 81% sequence accuracy.
 
 2. **ASR quality is the bottleneck, not matching.** All ASR-based approaches fail on the same samples. Better Arabic transcription (larger models, Quran-specific fine-tuning) would improve all of them.
 
