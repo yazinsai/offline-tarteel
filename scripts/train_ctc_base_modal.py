@@ -33,8 +33,8 @@ vol = modal.Volume.from_name("ctc-quran-training", create_if_missing=True)
 
 @app.function(
     image=image,
-    gpu="A10G",
-    timeout=10800,  # 3 hours
+    gpu="A100-80GB",
+    timeout=5400,  # 1.5 hours
     volumes={"/training": vol},
 )
 def train():
@@ -103,7 +103,7 @@ def train():
     print("Loading EveryAyah dataset (streaming)...")
     everyayah = load_dataset("tarteel-ai/everyayah", split="train", streaming=True)
     everyayah = everyayah.cast_column("audio", Audio(sampling_rate=16000))
-    everyayah = everyayah.filter(lambda x: x["duration"] <= 30.0)
+    everyayah = everyayah.filter(lambda x: x["duration"] <= 20.0)
     everyayah = everyayah.remove_columns(["duration", "reciter"])
 
     print("Loading RetaSy crowd-sourced dataset...")
@@ -191,16 +191,18 @@ def train():
     # ── Training ──
     training_args = TrainingArguments(
         output_dir=str(CHECKPOINT_DIR),
-        per_device_train_batch_size=8,
+        per_device_train_batch_size=32,
         gradient_accumulation_steps=2,
         learning_rate=3e-4,
-        warmup_steps=500,
-        max_steps=5000,
-        fp16=True,
+        warmup_steps=250,
+        max_steps=2500,
+        bf16=True,
         logging_steps=100,
         save_steps=1000,
         remove_unused_columns=False,
         dataloader_pin_memory=True,
+        dataloader_num_workers=4,
+        torch_compile=True,
         report_to="none",
         group_by_length=False,  # streaming doesn't support this
     )
@@ -214,7 +216,7 @@ def train():
     )
 
     print("\n" + "=" * 60)
-    print("  Training wav2vec2-base CTC on Quran audio (5000 steps)")
+    print("  Training wav2vec2-base CTC on Quran audio (2500 steps)")
     print("  Model: 95M params, Arabic CTC vocabulary")
     print("  Data: EveryAyah + RetaSy")
     print("=" * 60 + "\n")

@@ -33,17 +33,21 @@ vol = modal.Volume.from_name("ctc-quran-training", create_if_missing=True)
 
 @app.function(
     image=image,
-    gpu="A10G",
-    timeout=10800,  # 3 hours
+    gpu="A100-80GB",
+    timeout=5400,  # 1.5 hours
     volumes={"/training": vol},
-    memory=32768,  # 32 GB RAM for both models
+    memory=32768,
 )
-def train(alpha: float = 0.5, temperature: float = 2.0, max_steps: int = 5000):
+def train(alpha: float = 0.5, temperature: float = 2.0, max_steps: int = 3000):
     import torch
     import torch.nn as nn
     import torch.nn.functional as F
+    import math
     from pathlib import Path
-    from datasets import load_dataset, Audio, interleave_datasets
+    from dataclasses import dataclass
+    from typing import Any
+    from torch.utils.data import IterableDataset, DataLoader
+    from datasets import load_dataset, Audio
     from transformers import (
         Wav2Vec2ForCTC,
         Wav2Vec2Processor,
@@ -52,6 +56,8 @@ def train(alpha: float = 0.5, temperature: float = 2.0, max_steps: int = 5000):
     )
     import numpy as np
 
+    BATCH_SIZE = 16
+    GRAD_ACCUM = 2  # effective batch = 32
     OUTPUT_DIR = Path("/training/ctc-base-distilled")
     CHECKPOINT_DIR = Path("/training/distill-checkpoints")
     CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
@@ -80,7 +86,6 @@ def train(alpha: float = 0.5, temperature: float = 2.0, max_steps: int = 5000):
     pad_token_id = teacher_processor.tokenizer.pad_token_id
 
     # ── Create student model ──
-    # Try to load pre-fine-tuned student if available
     student_pretrained = Path("/training/ctc-base-finetuned")
     if student_pretrained.exists():
         print(f"Loading pre-fine-tuned student from {student_pretrained}...")
@@ -99,6 +104,7 @@ def train(alpha: float = 0.5, temperature: float = 2.0, max_steps: int = 5000):
 
     student.freeze_feature_encoder()
     student.to(device)
+    student = torch.compile(student)
     student.train()
 
     processor = teacher_processor
@@ -106,114 +112,177 @@ def train(alpha: float = 0.5, temperature: float = 2.0, max_steps: int = 5000):
     print(f"Teacher: {sum(p.numel() for p in teacher.parameters()):,} params")
     print(f"Student: {sum(p.numel() for p in student.parameters()):,} params")
     print(f"  Trainable: {sum(p.numel() for p in student.parameters() if p.requires_grad):,}")
-    print(f"Alpha: {alpha}, Temperature: {temperature}")
+    print(f"Alpha: {alpha}, Temperature: {temperature}, Batch: {BATCH_SIZE}x{GRAD_ACCUM}")
 
-    # ── Load dataset ──
+    # ── Streaming dataset with batched DataLoader ──
+    class StreamingCTCDataset(IterableDataset):
+        def __init__(self, stream, processor, max_audio_len):
+            self.stream = stream
+            self.processor = processor
+            self.max_audio_len = max_audio_len
+
+        def __iter__(self):
+            for sample in self.stream:
+                try:
+                    audio = sample["audio"]["array"]
+                    if len(audio) > self.max_audio_len:
+                        audio = audio[:self.max_audio_len]
+                    input_values = self.processor.feature_extractor(
+                        audio, sampling_rate=16000, return_tensors="np",
+                    ).input_values[0]
+                    with self.processor.as_target_processor():
+                        label_ids = self.processor(sample["text"]).input_ids
+                    yield {
+                        "input_values": input_values,
+                        "labels": label_ids,
+                    }
+                except Exception:
+                    continue
+
+    @dataclass
+    class DistillCollator:
+        pad_token_id: int
+
+        def __call__(self, features):
+            # Pad input_values
+            max_iv = max(len(f["input_values"]) for f in features)
+            iv_padded = []
+            iv_lengths = []
+            for f in features:
+                iv = f["input_values"]
+                iv_lengths.append(len(iv))
+                pad_len = max_iv - len(iv)
+                iv_padded.append(np.pad(iv, (0, pad_len)))
+            # Pad labels
+            max_lbl = max(len(f["labels"]) for f in features)
+            labels_padded = []
+            label_lengths = []
+            for f in features:
+                lbl = f["labels"]
+                label_lengths.append(len(lbl))
+                pad_len = max_lbl - len(lbl)
+                labels_padded.append(lbl + [self.pad_token_id] * pad_len)
+            return {
+                "input_values": torch.tensor(np.stack(iv_padded), dtype=torch.float32),
+                "labels": torch.tensor(labels_padded, dtype=torch.long),
+                "input_lengths": torch.tensor(iv_lengths, dtype=torch.long),
+                "label_lengths": torch.tensor(label_lengths, dtype=torch.long),
+            }
+
     print("Loading EveryAyah dataset (streaming)...")
     everyayah = load_dataset("tarteel-ai/everyayah", split="train", streaming=True)
     everyayah = everyayah.cast_column("audio", Audio(sampling_rate=16000))
-    everyayah = everyayah.filter(lambda x: x["duration"] <= 20.0)  # shorter for distillation
+    everyayah = everyayah.filter(lambda x: x["duration"] <= 20.0)
 
-    # ── Training loop ──
+    max_audio_len = int(20.0 * 16000)
+    dataset = StreamingCTCDataset(everyayah, processor, max_audio_len)
+    collator = DistillCollator(pad_token_id=pad_token_id)
+    loader = DataLoader(dataset, batch_size=BATCH_SIZE, collate_fn=collator, num_workers=4)
+
+    # ── Optimizer + scheduler ──
     optimizer = torch.optim.AdamW(
         [p for p in student.parameters() if p.requires_grad],
-        lr=1e-4,
+        lr=3e-4,
         weight_decay=0.01,
     )
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max_steps, eta_min=1e-5)
 
     ctc_loss_fn = nn.CTCLoss(blank=pad_token_id, reduction="mean", zero_infinity=True)
 
     print(f"\n{'='*60}")
-    print(f"  Starting knowledge distillation ({max_steps} steps)")
+    print(f"  Knowledge distillation ({max_steps} steps, effective batch={BATCH_SIZE*GRAD_ACCUM})")
     print(f"{'='*60}\n")
 
     step = 0
+    micro_step = 0
     running_loss = 0.0
     running_ctc = 0.0
     running_kl = 0.0
 
-    for sample in everyayah:
+    optimizer.zero_grad()
+
+    for batch in loader:
         if step >= max_steps:
             break
 
         try:
-            audio = sample["audio"]["array"]
-            text = sample["text"]
+            input_values = batch["input_values"].to(device)
+            labels = batch["labels"].to(device)
+            label_lengths = batch["label_lengths"].to(device)
+            B = input_values.size(0)
 
-            # Process audio
-            inputs = processor.feature_extractor(
-                audio, sampling_rate=16000, return_tensors="pt", padding=True
-            )
-            input_values = inputs.input_values.to(device)
+            with torch.autocast("cuda", dtype=torch.bfloat16):
+                # Teacher forward (no grad)
+                with torch.no_grad():
+                    teacher_logits = teacher(input_values).logits
 
-            # Tokenize for CTC labels
-            with processor.as_target_processor():
-                labels = processor(text).input_ids
-            labels_tensor = torch.tensor([labels], dtype=torch.long, device=device)
-            label_lengths = torch.tensor([len(labels)], dtype=torch.long, device=device)
+                # Student forward
+                student_logits = student(input_values).logits
 
-            # Teacher forward (no grad)
-            with torch.no_grad():
-                teacher_logits = teacher(input_values).logits  # (1, T_teacher, V)
+                T_student = student_logits.size(1)
+                T_teacher = teacher_logits.size(1)
 
-            # Student forward
-            student_out = student(input_values)
-            student_logits = student_out.logits  # (1, T_student, V)
+                # CTC loss — compute per-sample input lengths from model downsampling
+                # wav2vec2 downsamples by ~320x
+                input_sample_lengths = (batch["input_lengths"].float() / 320).long().clamp(min=1, max=T_student)
+                input_lengths = input_sample_lengths.to(device)
 
-            T_student = student_logits.size(1)
-            T_teacher = teacher_logits.size(1)
+                log_probs = F.log_softmax(student_logits, dim=-1).permute(1, 0, 2)
+                ctc = ctc_loss_fn(log_probs, labels, input_lengths, label_lengths)
 
-            # CTC loss on ground truth
-            log_probs = F.log_softmax(student_logits, dim=-1).permute(1, 0, 2)  # (T, 1, V)
-            input_lengths = torch.tensor([T_student], dtype=torch.long, device=device)
-            ctc = ctc_loss_fn(log_probs, labels_tensor, input_lengths, label_lengths)
+                # KL divergence — align temporal dims
+                if T_teacher != T_student:
+                    teacher_aligned = F.interpolate(
+                        teacher_logits.permute(0, 2, 1),
+                        size=T_student,
+                        mode="linear",
+                        align_corners=False,
+                    ).permute(0, 2, 1)
+                else:
+                    teacher_aligned = teacher_logits
 
-            # KL divergence on logit distributions
-            # Align temporal dimensions (interpolate teacher to student length)
-            if T_teacher != T_student:
-                teacher_aligned = F.interpolate(
-                    teacher_logits.permute(0, 2, 1),
-                    size=T_student,
-                    mode="linear",
-                    align_corners=False,
-                ).permute(0, 2, 1)
-            else:
-                teacher_aligned = teacher_logits
+                student_log_probs = F.log_softmax(student_logits / temperature, dim=-1)
+                teacher_probs = F.softmax(teacher_aligned / temperature, dim=-1)
+                kl = F.kl_div(student_log_probs, teacher_probs, reduction="batchmean") * (temperature ** 2)
 
-            student_log_probs = F.log_softmax(student_logits / temperature, dim=-1)
-            teacher_probs = F.softmax(teacher_aligned / temperature, dim=-1)
-            kl = F.kl_div(student_log_probs, teacher_probs, reduction="batchmean") * (temperature ** 2)
+                loss = (alpha * ctc + (1 - alpha) * kl) / GRAD_ACCUM
 
-            # Combined loss
-            loss = alpha * ctc + (1 - alpha) * kl
-
-            optimizer.zero_grad()
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(student.parameters(), max_norm=1.0)
-            optimizer.step()
+            micro_step += 1
 
-            running_loss += loss.item()
+            running_loss += loss.item() * GRAD_ACCUM
             running_ctc += ctc.item()
             running_kl += kl.item()
-            step += 1
 
-            if step % 100 == 0:
-                avg_loss = running_loss / 100
-                avg_ctc = running_ctc / 100
-                avg_kl = running_kl / 100
-                print(f"Step {step}/{max_steps}: loss={avg_loss:.4f} (ctc={avg_ctc:.4f}, kl={avg_kl:.4f})")
-                running_loss = 0.0
-                running_ctc = 0.0
-                running_kl = 0.0
+            if micro_step % GRAD_ACCUM == 0:
+                torch.nn.utils.clip_grad_norm_(student.parameters(), max_norm=1.0)
+                optimizer.step()
+                scheduler.step()
+                optimizer.zero_grad()
+                step += 1
 
-            if step % 1000 == 0:
-                ckpt_path = CHECKPOINT_DIR / f"step_{step}"
-                student.save_pretrained(str(ckpt_path))
-                vol.commit()
-                print(f"  Saved checkpoint at step {step}")
+                if step % 100 == 0:
+                    n = min(100, step) * GRAD_ACCUM
+                    avg_loss = running_loss / n * GRAD_ACCUM
+                    avg_ctc = running_ctc / n * GRAD_ACCUM
+                    avg_kl = running_kl / n * GRAD_ACCUM
+                    lr = scheduler.get_last_lr()[0]
+                    print(f"Step {step}/{max_steps}: loss={avg_loss:.4f} "
+                          f"(ctc={avg_ctc:.4f}, kl={avg_kl:.4f}) lr={lr:.2e}")
+                    running_loss = 0.0
+                    running_ctc = 0.0
+                    running_kl = 0.0
+
+                if step % 1000 == 0:
+                    ckpt_path = CHECKPOINT_DIR / f"step_{step}"
+                    student.save_pretrained(str(ckpt_path))
+                    vol.commit()
+                    print(f"  Saved checkpoint at step {step}")
 
         except Exception as e:
-            print(f"  Skipping sample (error: {e})")
+            print(f"  Skipping batch (error: {e})")
+            optimizer.zero_grad()
+            micro_step = 0
             continue
 
     # ── Save final model ──
@@ -252,7 +321,7 @@ def main():
     from pathlib import Path
 
     print("Starting knowledge distillation on Modal GPU...")
-    train.remote(alpha=0.5, temperature=2.0, max_steps=5000)
+    train.remote(alpha=0.5, temperature=2.0, max_steps=3000)
 
     print("\nDownloading distilled model...")
     out_dir = Path("data/ctc-base-distilled")

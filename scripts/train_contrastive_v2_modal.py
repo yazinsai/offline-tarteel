@@ -1,5 +1,5 @@
 """
-Train QuranCLAP v2 contrastive model on Modal A10G.
+Train QuranCLAP v2 contrastive model on Modal A100-80GB.
 
 Multi-reciter contrastive learning:
 - Same verse from different reciters = positive pairs
@@ -36,19 +36,19 @@ vol = modal.Volume.from_name("contrastive-v2-training", create_if_missing=True)
 
 @app.function(
     image=image,
-    gpu="A10G",
-    timeout=14400,  # 4 hours
+    gpu="A100-80GB",
+    timeout=7200,  # 2 hours
     volumes={"/training": vol},
-    memory=32768,
+    memory=65536,
 )
 def train(
-    batch_size: int = 64,
-    phase1_epochs: int = 10,
-    phase2_epochs: int = 20,
-    phase1_lr: float = 1e-3,
-    phase2_lr: float = 1e-4,
+    batch_size: int = 256,
+    phase1_epochs: int = 6,
+    phase2_epochs: int = 12,
+    phase1_lr: float = 2e-3,
+    phase2_lr: float = 2e-4,
     embed_dim: int = 256,
-    max_samples: int = 50000,
+    max_samples: int = 100000,
     max_audio_seconds: float = 15.0,
 ):
     import torch
@@ -135,6 +135,7 @@ def train(
         embed_dim, True, True,
     )
     model.to(device)
+    model = torch.compile(model)
     tokenizer = AutoTokenizer.from_pretrained("aubmindlab/bert-base-arabertv02")
 
     total = sum(p.numel() for p in model.parameters())
@@ -200,7 +201,7 @@ def train(
         }
 
     train_loader = DataLoader(AudioTextDataset(train_samples), batch_size=batch_size,
-                              shuffle=True, collate_fn=collate, num_workers=4, drop_last=True)
+                              shuffle=True, collate_fn=collate, num_workers=8, drop_last=True)
     val_loader = DataLoader(AudioTextDataset(val_samples), batch_size=batch_size,
                             shuffle=False, collate_fn=collate, num_workers=2, drop_last=True)
 
@@ -225,17 +226,20 @@ def train(
             ids = text_enc["input_ids"].to(device)
             tmask = text_enc["attention_mask"].to(device)
 
+            with torch.autocast("cuda", dtype=torch.bfloat16):
+                if is_train:
+                    la, lt = model(audio, ids, tmask, mask)
+                    loss = clip_loss(la, lt)
+                else:
+                    with torch.no_grad():
+                        la, lt = model(audio, ids, tmask, mask)
+                        loss = clip_loss(la, lt)
+
             if is_train:
-                la, lt = model(audio, ids, tmask, mask)
-                loss = clip_loss(la, lt)
                 optimizer.zero_grad()
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                 optimizer.step()
-            else:
-                with torch.no_grad():
-                    la, lt = model(audio, ids, tmask, mask)
-                    loss = clip_loss(la, lt)
 
             total_loss += loss.item()
             preds = la.argmax(dim=-1)
