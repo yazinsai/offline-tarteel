@@ -34,7 +34,7 @@ vol = modal.Volume.from_name("ctc-quran-training", create_if_missing=True)
 @app.function(
     image=image,
     gpu="A100-80GB",
-    timeout=5400,  # 1.5 hours
+    timeout=10800,  # 3 hours
     volumes={"/training": vol},
 )
 def train():
@@ -193,9 +193,9 @@ def train():
         output_dir=str(CHECKPOINT_DIR),
         per_device_train_batch_size=32,
         gradient_accumulation_steps=2,
-        learning_rate=3e-4,
-        warmup_steps=250,
-        max_steps=2500,
+        learning_rate=1e-4,
+        warmup_steps=500,
+        max_steps=5000,
         bf16=True,
         logging_steps=100,
         save_steps=1000,
@@ -214,7 +214,7 @@ def train():
     )
 
     print("\n" + "=" * 60)
-    print("  Training wav2vec2-base CTC on Quran audio (2500 steps)")
+    print("  Training wav2vec2-base CTC on Quran audio (5000 steps)")
     print("  Model: 95M params, Arabic CTC vocabulary")
     print("  Data: EveryAyah + RetaSy")
     print("=" * 60 + "\n")

@@ -39,16 +39,16 @@ vol = modal.Volume.from_name("contrastive-v2-training", create_if_missing=True)
     gpu="A100-80GB",
     timeout=7200,  # 2 hours
     volumes={"/training": vol},
-    memory=65536,
+    memory=32768,
 )
 def train(
-    batch_size: int = 256,
+    batch_size: int = 128,
     phase1_epochs: int = 6,
     phase2_epochs: int = 12,
     phase1_lr: float = 2e-3,
     phase2_lr: float = 2e-4,
     embed_dim: int = 256,
-    max_samples: int = 100000,
+    max_samples: int = 30000,
     max_audio_seconds: float = 15.0,
 ):
     import torch
@@ -135,7 +135,6 @@ def train(
         embed_dim, True, True,
     )
     model.to(device)
-    model = torch.compile(model)
     tokenizer = AutoTokenizer.from_pretrained("aubmindlab/bert-base-arabertv02")
 
     total = sum(p.numel() for p in model.parameters())
