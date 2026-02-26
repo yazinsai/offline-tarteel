@@ -27,7 +27,7 @@ RESULTS_DIR = Path(__file__).parent / "results"
 
 EXPERIMENT_REGISTRY = {
     "whisper-lora": EXPERIMENTS_DIR / "whisper-lora" / "run.py",
-    "moonshine-lora": EXPERIMENTS_DIR / "moonshine-lora" / "run.py",
+
     "embedding-search": EXPERIMENTS_DIR / "embedding-search" / "run.py",
     "contrastive": EXPERIMENTS_DIR / "contrastive" / "run.py",
     "streaming-asr": EXPERIMENTS_DIR / "streaming-asr" / "run.py",

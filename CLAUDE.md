@@ -156,6 +156,8 @@ def model_size() -> int:                  # model size in bytes
 | streaming-asr | mlx-whisper chunked | — | — | — | — | — |
 | new-models/* | Various HF models | — | — | — | — | — |
 
+**Dead ends:** Moonshine Tiny AR LoRA (character-level tokenizer makes it un-fine-tunable, see README "What we tried").
+
 ## Python Environment
 
 Always use `.venv/bin/python` — the system Python lacks project dependencies.

@@ -68,7 +68,6 @@ benchmark/               # Evaluation framework
 
 data/                    # Reference data
   quran.json             # 6,236 verses (uthmani + cleaned text)
-  lora-adapter-small/    # Trained LoRA adapter (~21 MB)
   reference_audio/       # EveryAyah samples (Alafasy)
   test_audio/            # User recordings
 
@@ -81,7 +80,7 @@ scripts/                 # Training scripts (Modal A10G GPU)
   train_distill_modal.py     # Knowledge distillation (large CTC -> small CTC)
   train_contrastive_v2_modal.py  # QuranCLAP v2 contrastive training
   train_modal.py         # LoRA training (whisper-lora experiment)
-  train_lora.py          # Local training script (MPS/CUDA)
+  train_lora.py          # Local LoRA training script (MPS/CUDA)
 
 docs/plans/              # Design docs and experiment plans
 REPORT.md                # Full experiment report with cross-comparison
@@ -247,6 +246,8 @@ Some experiments have additional dependencies (faiss-cpu, moonshine, mlx-whisper
 4. **Small models can match large ones.** Moonshine Tiny Arabic (103 MB) matches Whisper Large-v3-Turbo (3.1 GB) on our benchmark. Knowledge distillation should transfer the large CTC model's accuracy into a base-sized model.
 
 5. **Short verses are hard across all approaches.** Verses under 3-4 words don't provide enough signal. May need minimum-length gating or surah-context bias in the final product.
+
+6. **Moonshine Tiny AR is not LoRA-able for Arabic.** Its LLaMA-derived tokenizer has only ~54 Arabic character tokens, making the decoder extremely fragile to any weight perturbation. We tried LoRA (r=4 and r=8, encoder-only and full), full fine-tuning, with and without diacritics -- every config degraded the base model (56% -> 35-38%). The base model is useful as-is for two-stage Stage 1 but shouldn't be fine-tuned.
 
 ## Further reading
 
