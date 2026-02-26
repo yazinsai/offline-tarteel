@@ -21,25 +21,25 @@ Benchmarked on 54 samples (user recordings, professional reference audio, crowds
 | Experiment | Approach | SeqAcc | Recall | Precision | Latency | Size |
 |---|---|---|---|---|---|---|
 | **ctc-alignment** | wav2vec2 CTC forced alignment (fine-tuned) | **81%** | **83%** | **83%** | ~5s | 1.2 GB |
+| two-stage (large CTC) | Moonshine ASR → top-50 → large CTC re-score | 72% | 78% | 78% | ~7s | 1.3 GB |
 | tarteel-whisper-base | tarteel-ai/whisper-base-ar-quran + QuranDB | 67% | 72% | 75% | ~3s | 290 MB |
 | whisper-lora | Whisper-small + LoRA fine-tune + QuranDB | 58% | 64% | 65% | ~1.3s | 485 MB |
+| contrastive-v2 | QuranCLAP v2 audio fingerprinting | failed | — | — | — | ~367 MB |
 
-None of these hit the target. CTC alignment is the most accurate but 6x over the size budget and 5x over the latency budget. The ASR-based approaches are smaller but top out at 72% recall because Arabic transcription quality is the bottleneck.
+None of these hit the target. CTC alignment is the most accurate but 6x over the size budget and 5x over the latency budget. Two-stage proves the retrieval+re-score approach works (72% with only 50 candidates vs 81% scoring all 6,236), but currently uses the same large CTC model for re-scoring so it's even bigger. The ASR-based approaches top out at 72% recall because Arabic transcription quality is the bottleneck. Contrastive v2 failed to learn meaningful audio-text alignment (see "What we tried").
 
-## Next experiments
+## Experiment status
 
-Three parallel experiments designed to break through the accuracy/size/speed tradeoff:
+Three parallel experiments were designed to break through the accuracy/size/speed tradeoff. All three hit the same wall: **wav2vec2-base (English-only pretrained) cannot learn Arabic speech representations.** Training was done on Modal A100-80GB GPUs.
 
-### Two-Stage Retrieval
-Moonshine Tiny Arabic (27M params, 103 MB) does fast ASR to get a rough transcript, then a small CTC model re-scores only the top 50 verse candidates. This bounds the expensive CTC computation to 50 candidates instead of 6,236, getting CTC-level accuracy at a fraction of the latency.
+### Two-Stage Retrieval (72% SeqAcc -- only working approach, but too large)
+Moonshine Tiny Arabic (27M params, 103 MB) does fast ASR to get a rough transcript, then CTC forced-alignment re-scores only the top 50 verse candidates. This bounds the expensive CTC computation to 50 candidates instead of 6,236. Currently falls back to the large CTC model (1.2 GB) because the small CTC model failed to train (see "What we tried"). With a working small CTC re-scorer (~95 MB), this would hit the size target.
 
-### Distilled CTC
-wav2vec2-base (95M params, ~380 MB, target ~95 MB after int8 quantization) fine-tuned for Arabic CTC, then knowledge-distilled from the large model. Same CTC scoring approach as the current best, but 3x smaller. The teacher-student distillation transfers the large model's discriminative power into the small model's architecture.
+### Distilled CTC (failed)
+wav2vec2-base (95M params) knowledge-distilled from the large CTC model. The base model can't learn Arabic CTC -- English-only pretraining means no Arabic speech representations to build on (see "What we tried"). The smallest multilingual alternatives (MMS-300M, XLS-R-300M) are ~300M params, barely smaller than the 317M large model, which defeats the purpose.
 
-### Contrastive V2 (Audio Fingerprinting)
-CLIP-style contrastive model mapping audio to a speaker-invariant 256-dim embedding. Pre-computed FAISS index of all 6,236 verses. At inference: one forward pass + nearest neighbor search = verse ID. No ASR, no text matching. Key improvements over v1: wav2vec2-base encoder (cross-lingual, not English-only HuBERT), deeper projection heads, multi-reciter training data, proper batch sizes (64-128 on GPU).
-
-All three train on Modal A10G GPUs. Local Mac is inference-only.
+### Contrastive V2 (failed)
+CLIP-style contrastive model mapping audio to a speaker-invariant 256-dim embedding. Trained for 8 epochs (6 frozen + 2 unfrozen) on 30k EveryAyah samples on A100-80GB. Validation accuracy stuck at ~9% (random chance = 3.1% with batch 32) -- the model memorizes training data but doesn't generalize. Same root cause: wav2vec2-base doesn't produce useful Arabic audio features. See "What we tried" below.
 
 ## Project structure
 
@@ -51,9 +51,9 @@ shared/                  # Common utilities used by all experiments
 
 experiments/             # Each approach gets its own directory
   ctc-alignment/         # CTC forced alignment (current best, 81%)
-  two-stage/             # Moonshine ASR + CTC re-score (in progress)
-  distilled-ctc/         # wav2vec2-base knowledge-distilled (in progress)
-  contrastive-v2/        # QuranCLAP v2 audio fingerprinting (in progress)
+  two-stage/             # Moonshine ASR + CTC re-score (72%, large model fallback)
+  distilled-ctc/         # wav2vec2-base knowledge-distilled (failed)
+  contrastive-v2/        # QuranCLAP v2 audio fingerprinting (failed)
   whisper-lora/          # Whisper-small + LoRA adapter
   tarteel-whisper-base/  # Tarteel's whisper-base-ar-quran
   embedding-search/      # HuBERT + FAISS nearest-neighbor
@@ -75,10 +75,10 @@ web/                     # Live demo
   server.py              # FastAPI backend
   frontend/              # React frontend
 
-scripts/                 # Training scripts (Modal A10G GPU)
-  train_ctc_base_modal.py    # wav2vec2-base CTC fine-tuning (shared by two-stage + distilled-ctc)
-  train_distill_modal.py     # Knowledge distillation (large CTC -> small CTC)
-  train_contrastive_v2_modal.py  # QuranCLAP v2 contrastive training
+scripts/                 # Training scripts (Modal A100-80GB GPU)
+  train_ctc_base_modal.py    # wav2vec2-base CTC fine-tuning (failed -- see "What we tried")
+  train_distill_modal.py     # Knowledge distillation (blocked on CTC base)
+  train_contrastive_v2_modal.py  # QuranCLAP v2 contrastive training (in progress)
   train_modal.py         # LoRA training (whisper-lora experiment)
   train_lora.py          # Local LoRA training script (MPS/CUDA)
 
@@ -98,33 +98,33 @@ CTC forced alignment using a pre-trained Arabic wav2vec2 model. Scores candidate
 - **Model:** `jonatasgrosman/wav2vec2-large-xlsr-53-arabic` (1.2 GB)
 - **Gap to target:** Accurate enough to prove the approach works, but too large (6x) and too slow (5x) for on-device use.
 
-### two-stage (in progress)
+### two-stage (72% SeqAcc -- large CTC fallback)
 
 Moonshine Tiny Arabic (27M) for fast ASR, then CTC forced-alignment re-scoring on just the top 50 candidates. Bounds the expensive CTC computation from 6,236 verses to 50.
 
 - **Stage 1:** Moonshine Tiny Arabic (103 MB) -> transcript -> QuranDB.search(top_k=50)
-- **Stage 2:** wav2vec2-base CTC (target ~95 MB after quantization) -> re-score 50 candidates
-- **Target size:** ~200 MB combined
-- **Requires:** Modal-trained wav2vec2-base CTC model (`scripts/train_ctc_base_modal.py`)
+- **Stage 2:** CTC re-score 50 candidates (currently falls back to large model)
+- **Result:** 72% SeqAcc, 78% recall, 78% precision with large CTC re-scorer
+- **Blocker:** No working small CTC model. wav2vec2-base can't learn Arabic (see "What we tried").
+- **Target size:** ~200 MB with a working small CTC model
 
-### distilled-ctc (in progress)
+### distilled-ctc (blocked)
 
 wav2vec2-base (95M params) with knowledge distillation from the large CTC model. Same scoring approach as ctc-alignment but 3x smaller.
 
 - **Teacher:** wav2vec2-large-xlsr-53-arabic (315M params, 1.2 GB)
 - **Student:** wav2vec2-base + Arabic CTC head (95M params, ~380 MB, target ~95 MB int8)
-- **Loss:** alpha * CTC(student, ground_truth) + (1-alpha) * KL(student || teacher)
-- **Requires:** Modal training (`scripts/train_ctc_base_modal.py`, then `scripts/train_distill_modal.py`)
+- **Status:** Blocked. The student model (wav2vec2-base) can't learn Arabic CTC -- English-only pretraining means no Arabic speech representations to build on. See "What we tried" below.
 
-### contrastive-v2 (in progress)
+### contrastive-v2 (failed -- val accuracy stuck at 9%)
 
 CLIP-style contrastive model (QuranCLAP v2). Maps audio to a speaker-invariant 256-dim embedding, matched against a pre-computed FAISS index of all 6,236 verses. One forward pass + nearest neighbor = verse ID. No ASR needed.
 
-- **Audio encoder:** wav2vec2-base (cross-lingual, not English-only HuBERT like v1)
-- **Text encoder:** AraBERT v02
-- **Training:** Multi-reciter EveryAyah data, batch size 64-128, two-phase (frozen -> unfreeze last 2 layers)
+- **Audio encoder:** wav2vec2-base (95M params)
+- **Text encoder:** AraBERT v02 (136M params)
+- **Training:** 30k samples from EveryAyah, batch 32 (effective 128 via grad accum), two-phase (frozen -> unfreeze last 2 layers), A100-80GB
+- **Result:** Val accuracy stuck at ~9% after 8 epochs. Model overfits (train acc 14%, val acc 9%). wav2vec2-base can't produce useful Arabic audio representations.
 - **Target size:** ~367 MB (audio encoder + projection + FAISS index)
-- **Requires:** Modal training (`scripts/train_contrastive_v2_modal.py`)
 
 ### tarteel-whisper-base (67% accuracy, 290 MB)
 
@@ -239,13 +239,17 @@ Some experiments have additional dependencies (faiss-cpu, moonshine, mlx-whisper
 
 1. **CTC forced alignment is the most accurate approach** -- scoring candidates directly against frame logits avoids the information loss of greedy decoding, giving 81% accuracy. But the model is too large (1.2 GB) for on-device deployment.
 
-2. **ASR quality is the bottleneck for transcribe-then-match approaches.** All ASR-based approaches fail on the same samples. The two-stage experiment sidesteps this by using ASR only for candidate retrieval, then CTC for the final decision.
+2. **Two-stage retrieval works.** Using ASR only for candidate retrieval (top 50) then CTC for the final decision gets 72% SeqAcc -- only 9 points behind scoring all 6,236 verses. The retrieval step is fast and the accuracy gap comes from candidate recall, not re-scoring quality.
 
-3. **Embedding search needs speaker invariance.** HuBERT embeddings encode speaker identity more than linguistic content (100% same-reciter, 0% cross-speaker). Contrastive-v2 addresses this with multi-reciter contrastive training.
+3. **ASR quality is the bottleneck for transcribe-then-match approaches.** All ASR-based approaches fail on the same samples. Two-stage sidesteps this by using ASR only for candidate retrieval, not the final decision.
 
-4. **Small models can match large ones.** Moonshine Tiny Arabic (103 MB) matches Whisper Large-v3-Turbo (3.1 GB) on our benchmark. Knowledge distillation should transfer the large CTC model's accuracy into a base-sized model.
+4. **There are no small Arabic wav2vec2 models.** wav2vec2-base (95M, English-only) can't learn Arabic CTC from scratch. The smallest multilingual models (MMS-300M, XLS-R-300M) are ~300M params -- barely smaller than the large model. This is the fundamental blocker for the CTC-based size reduction path.
 
-5. **Short verses are hard across all approaches.** Verses under 3-4 words don't provide enough signal. May need minimum-length gating or surah-context bias in the final product.
+5. **Contrastive audio-text matching needs a multilingual encoder.** Both embedding search (HuBERT, 0% cross-speaker) and contrastive-v2 (wav2vec2-base, 9% val accuracy) failed because English-pretrained audio encoders don't produce useful features for Arabic speech. Multi-reciter training and deeper projection heads aren't enough to overcome bad audio representations.
+
+6. **Small ASR models can match large ones.** Moonshine Tiny Arabic (103 MB) matches Whisper Large-v3-Turbo (3.1 GB) on our benchmark. But fine-tuning Moonshine degrades it (LLaMA tokenizer with character-level Arabic tokens is fragile).
+
+7. **Short verses are hard across all approaches.** Verses under 3-4 words don't provide enough signal. May need minimum-length gating or surah-context bias in the final product.
 
 ## What we tried (and didn't work)
 
@@ -265,6 +269,43 @@ Every configuration degraded the model. Base Moonshine scores 56% SeqAcc; the be
 **Root cause:** Moonshine uses a LLaMA-derived tokenizer with only ~54 Arabic character tokens out of 32K vocab. Every Arabic character is its own token, so the decoder does character-by-character generation. Any weight perturbation (even LoRA r=4 at low LR) corrupts the character sequences, producing garbled output like `ب س الهر حا الحي` instead of `بسم الله الرحمن الرحيم`.
 
 **Conclusion:** The base model (56% SeqAcc, 103 MB) is useful as-is for the two-stage pipeline's Stage 1 (rough transcript for candidate retrieval), but shouldn't be fine-tuned.
+
+### wav2vec2-base Arabic CTC fine-tuning
+
+Attempted to fine-tune `facebook/wav2vec2-base` (95M params, English SSL pretrained) with an Arabic CTC head, using the vocabulary from `jonatasgrosman/wav2vec2-large-xlsr-53-arabic`. Trained on EveryAyah + RetaSy datasets (85/15 interleave) on Modal A100-80GB.
+
+**What we tried:**
+- LR 3e-4, 5000 steps, batch 32 x grad_accum 2 → model collapsed at step ~1400, outputting only token 46 (a diacritic)
+- LR 1e-4, 5000 steps → loss plateaued at 3.2-3.3 through all 5000 steps, model outputs only token 0 (pad)
+- Frozen CNN feature extractor, only training transformer layers + CTC head
+
+**Root cause:** wav2vec2-base was pretrained on English-only LibriSpeech. Its SSL representations encode English phonemes, not Arabic ones. Fine-tuning the transformer layers and CTC head alone can't bridge this gap -- the CNN feature extractor (which is frozen) produces features that don't represent Arabic speech sounds. The loss never drops below 3.2 because the model fundamentally can't distinguish Arabic characters from the audio features it receives.
+
+**Alternatives considered:**
+- `facebook/mms-300m` (multilingual, knows Arabic) -- 300M params, barely smaller than the 317M large model
+- `facebook/wav2vec2-xls-r-300m` (multilingual) -- same size issue
+- `DistilHuBERT` (23.5M params) -- English-only, same problem as wav2vec2-base
+
+**Conclusion:** There is no existing small (<150M params) wav2vec2-family model with Arabic speech representations. Getting a small CTC model requires either (a) distilling from a multilingual model that already works, or (b) a different architecture entirely. This blocks both the distilled-ctc and two-stage experiments' path to the size target.
+
+### Contrastive v2 (QuranCLAP v2) training
+
+Attempted CLIP-style contrastive learning with wav2vec2-base (audio) + AraBERT v02 (text). Trained on 30k EveryAyah samples on Modal A100-80GB, batch 32 with gradient accumulation 4 (effective batch 128).
+
+**Training log:**
+
+| Epoch | Train Loss | Train Acc | Val Loss | Val Acc |
+|-------|-----------|-----------|----------|---------|
+| P1 E1 (frozen) | 2.88 | 9.7% | 3.05 | 9.0% |
+| P1 E6 (frozen) | 2.56 | 13.9% | 3.12 | 8.8% |
+| P2 E1 (unfrozen) | 2.77 | 11.9% | 3.03 | 9.0% |
+| P2 E2 (unfrozen) | 2.56 | 14.1% | 3.07 | 9.4% |
+
+Random chance with batch 32 = 3.1%. Val accuracy plateaued at ~9% across all 8 epochs while train accuracy climbed to 14% -- classic overfitting. Unfreezing the last 2 encoder layers in Phase 2 didn't help.
+
+**Root cause:** Same as CTC: wav2vec2-base produces English speech features, not Arabic ones. The projection heads can memorize training pairs but can't learn generalizable audio-text alignment because the audio features don't encode Arabic phonetic content. The AraBERT text encoder works fine -- the bottleneck is entirely on the audio side.
+
+**Conclusion:** Any approach using wav2vec2-base as an Arabic audio encoder will fail. Future contrastive attempts need a multilingual audio encoder (e.g., XLS-R-300M, MMS-1B) or a completely different architecture.
 
 ## Further reading
 

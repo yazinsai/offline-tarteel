@@ -158,6 +158,14 @@ def model_size() -> int:                  # model size in bytes
 
 **Dead ends:** Moonshine Tiny AR LoRA (character-level tokenizer makes it un-fine-tunable, see README "What we tried").
 
+## Training
+
+Use **Modal** (modal.com) for GPU training jobs. Training scripts live in `scripts/` and are named `*_modal.py`. Always spawn Modal jobs detached (`modal run --detach`) so they keep running if the terminal closes or internet disconnects.
+
+```bash
+modal run --detach scripts/train_xxx_modal.py
+```
+
 ## Python Environment
 
 Always use `.venv/bin/python` — the system Python lacks project dependencies.

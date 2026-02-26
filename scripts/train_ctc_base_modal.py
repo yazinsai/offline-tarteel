@@ -133,10 +133,24 @@ def train():
     print("Datasets interleaved (85% EveryAyah + 15% RetaSy)")
 
     # ── Prepare dataset ──
+    import io
+    import soundfile as sf
+
     def prepare_dataset(batch):
-        audio = batch["audio"]
+        audio_data = batch["audio"]
+        # Handle both streaming formats: {"array": [...]} or {"bytes": b"..."}
+        if isinstance(audio_data, dict) and "array" in audio_data:
+            audio_array = audio_data["array"]
+        elif isinstance(audio_data, dict) and "bytes" in audio_data:
+            audio_array, sr = sf.read(io.BytesIO(audio_data["bytes"]), dtype="float32")
+            if sr != 16000:
+                import librosa
+                audio_array = librosa.resample(audio_array, orig_sr=sr, target_sr=16000)
+        else:
+            raise ValueError(f"Unexpected audio format: {type(audio_data)}")
+
         batch["input_values"] = processor.feature_extractor(
-            audio["array"],
+            audio_array,
             sampling_rate=16000,
             return_tensors="np",
         ).input_values[0]

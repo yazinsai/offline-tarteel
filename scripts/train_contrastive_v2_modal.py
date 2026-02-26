@@ -19,7 +19,7 @@ app = modal.App("contrastive-v2-quran")
 
 image = (
     modal.Image.debian_slim(python_version="3.11")
-    .apt_install("ffmpeg")
+    .apt_install("ffmpeg", "libsndfile1-dev")
     .pip_install(
         "torch",
         "transformers>=4.40,<5",
@@ -42,7 +42,7 @@ vol = modal.Volume.from_name("contrastive-v2-training", create_if_missing=True)
     memory=32768,
 )
 def train(
-    batch_size: int = 128,
+    batch_size: int = 32,
     phase1_epochs: int = 6,
     phase2_epochs: int = 12,
     phase1_lr: float = 2e-3,
@@ -51,6 +51,9 @@ def train(
     max_samples: int = 30000,
     max_audio_seconds: float = 15.0,
 ):
+    import os
+    os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+
     import torch
     import torch.nn as nn
     import torch.nn.functional as F
@@ -65,6 +68,8 @@ def train(
     from transformers import Wav2Vec2Model, AutoModel, AutoTokenizer
     from tqdm import tqdm
     import faiss
+
+    GRAD_ACCUM = 4  # effective batch = batch_size * GRAD_ACCUM = 128
 
     OUTPUT_DIR = Path("/training/contrastive-v2-model")
     CHECKPOINT_DIR = Path("/training/contrastive-v2-checkpoints")
@@ -147,13 +152,30 @@ def train(
     ds = ds.cast_column("audio", Audio(sampling_rate=16000))
     ds = ds.filter(lambda x: x["duration"] <= max_audio_seconds)
 
+    import io
+    import soundfile as sf
+
     max_audio_len = int(max_audio_seconds * 16000)
     samples = []
+    n_errors = 0
     for sample in tqdm(ds, total=max_samples, desc="Loading"):
         if len(samples) >= max_samples:
             break
         try:
-            audio = sample["audio"]["array"]
+            audio_data = sample["audio"]
+            # Streaming mode may return {"array": [...]} or {"bytes": b"..."}
+            if isinstance(audio_data, dict) and "array" in audio_data:
+                audio = np.array(audio_data["array"], dtype=np.float32)
+            elif isinstance(audio_data, dict) and "bytes" in audio_data:
+                # Manually decode WAV bytes
+                wav_bytes = audio_data["bytes"]
+                audio, sr = sf.read(io.BytesIO(wav_bytes), dtype="float32")
+                if sr != 16000:
+                    import librosa
+                    audio = librosa.resample(audio, orig_sr=sr, target_sr=16000)
+            else:
+                raise ValueError(f"Unexpected audio format: {type(audio_data)}")
+
             if len(audio) > max_audio_len:
                 audio = audio[:max_audio_len]
             samples.append({
@@ -161,10 +183,13 @@ def train(
                 "text": sample["text"],
                 "reciter": sample["reciter"],
             })
-        except Exception:
+        except Exception as e:
+            n_errors += 1
+            if n_errors <= 5:
+                print(f"  Error loading sample #{n_errors}: {type(e).__name__}: {e}")
             continue
 
-    print(f"Loaded {len(samples)} samples")
+    print(f"Loaded {len(samples)} samples ({n_errors} errors)")
 
     # Split 90/10
     n_train = int(0.9 * len(samples))
@@ -216,7 +241,10 @@ def train(
         model.train() if is_train else model.eval()
         total_loss, total_correct, total_n = 0.0, 0, 0
 
-        for batch in tqdm(loader, desc=desc, leave=False):
+        if is_train:
+            optimizer.zero_grad()
+
+        for step, batch in enumerate(tqdm(loader, desc=desc, leave=False)):
             audio = batch["audio"].to(device)
             mask = batch["mask"].to(device)
             texts = batch["text"]
@@ -228,19 +256,22 @@ def train(
             with torch.autocast("cuda", dtype=torch.bfloat16):
                 if is_train:
                     la, lt = model(audio, ids, tmask, mask)
-                    loss = clip_loss(la, lt)
+                    loss = clip_loss(la, lt) / GRAD_ACCUM
                 else:
                     with torch.no_grad():
                         la, lt = model(audio, ids, tmask, mask)
                         loss = clip_loss(la, lt)
 
             if is_train:
-                optimizer.zero_grad()
                 loss.backward()
-                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                optimizer.step()
+                if (step + 1) % GRAD_ACCUM == 0:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                    optimizer.step()
+                    optimizer.zero_grad()
 
-            total_loss += loss.item()
+            # Undo the /GRAD_ACCUM scaling for reporting
+            reported_loss = loss.item() * GRAD_ACCUM if is_train else loss.item()
+            total_loss += reported_loss
             preds = la.argmax(dim=-1)
             labels = torch.arange(la.shape[0], device=device)
             total_correct += (preds == labels).sum().item()

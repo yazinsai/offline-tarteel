@@ -122,9 +122,20 @@ def train(alpha: float = 0.5, temperature: float = 2.0, max_steps: int = 3000):
             self.max_audio_len = max_audio_len
 
         def __iter__(self):
+            import io
+            import soundfile as sf
             for sample in self.stream:
                 try:
-                    audio = sample["audio"]["array"]
+                    audio_data = sample["audio"]
+                    if isinstance(audio_data, dict) and "array" in audio_data:
+                        audio = audio_data["array"]
+                    elif isinstance(audio_data, dict) and "bytes" in audio_data:
+                        audio, sr = sf.read(io.BytesIO(audio_data["bytes"]), dtype="float32")
+                        if sr != 16000:
+                            import librosa
+                            audio = librosa.resample(audio, orig_sr=sr, target_sr=16000)
+                    else:
+                        continue
                     if len(audio) > self.max_audio_len:
                         audio = audio[:self.max_audio_len]
                     input_values = self.processor.feature_extractor(
