@@ -247,7 +247,24 @@ Some experiments have additional dependencies (faiss-cpu, moonshine, mlx-whisper
 
 5. **Short verses are hard across all approaches.** Verses under 3-4 words don't provide enough signal. May need minimum-length gating or surah-context bias in the final product.
 
-6. **Moonshine Tiny AR is not LoRA-able for Arabic.** Its LLaMA-derived tokenizer has only ~54 Arabic character tokens, making the decoder extremely fragile to any weight perturbation. We tried LoRA (r=4 and r=8, encoder-only and full), full fine-tuning, with and without diacritics -- every config degraded the base model (56% -> 35-38%). The base model is useful as-is for two-stage Stage 1 but shouldn't be fine-tuned.
+## What we tried (and didn't work)
+
+### Moonshine Tiny AR LoRA fine-tuning
+
+Attempted to LoRA fine-tune [UsefulSensors/moonshine-tiny-ar](https://huggingface.co/UsefulSensors/moonshine-tiny-ar) (27M params, 103 MB) on Quran audio to improve its transcription for verse matching.
+
+**What we tried:**
+- LoRA r=8 on all attention (q/k/v/o_proj), lr=5e-4, 3000 steps
+- LoRA r=4 encoder-only (decoder frozen), lr=1e-4, 2000 steps
+- LoRA r=8 decoder-only, various learning rates
+- Full fine-tuning (all 27M params), lr=2e-5, 3000 steps
+- Diacritics stripped + EOS token appended (fixing data distribution mismatch)
+
+Every configuration degraded the model. Base Moonshine scores 56% SeqAcc; the best fine-tuned variant dropped to 35-38%.
+
+**Root cause:** Moonshine uses a LLaMA-derived tokenizer with only ~54 Arabic character tokens out of 32K vocab. Every Arabic character is its own token, so the decoder does character-by-character generation. Any weight perturbation (even LoRA r=4 at low LR) corrupts the character sequences, producing garbled output like `ب س الهر حا الحي` instead of `بسم الله الرحمن الرحيم`.
+
+**Conclusion:** The base model (56% SeqAcc, 103 MB) is useful as-is for the two-stage pipeline's Stage 1 (rough transcript for candidate retrieval), but shouldn't be fine-tuned.
 
 ## Further reading
 
