@@ -2,11 +2,21 @@
 
 Offline Quran verse recognition. Record someone reciting, identify the surah and ayah -- no internet required.
 
-This repo is a research workbench for evaluating different approaches to the problem: ASR-based transcription + fuzzy matching, audio embedding search, contrastive audio-text models, CTC forced alignment, and streaming ASR. Each approach lives in its own experiment directory with a standardized `run.py` interface, and a shared benchmark runner evaluates them all against the same test corpus.
+## Goal
+
+Ship a model that runs on-device (phone or laptop) with **95%+ recall**, **sub-second latency**, and **under 200 MB** on disk. The current best approach (CTC forced alignment) hits 81% recall but weighs 1.2 GB and takes ~5s -- too large and too slow for a real product. Everything in this repo exists to close that gap.
+
+## Design constraints
+
+- **Offline-first.** No network calls at inference time. The model, index, and reference data all ship with the app.
+- **Small models only.** Target < 200 MB total (model + any index). Phone storage is limited and download size matters.
+- **Fast inference.** Under 1 second on Apple Silicon (MPS) or recent phone SoC. Users expect near-instant feedback after reciting.
+- **Speaker-invariant.** Must work across accents, recording quality, and recitation styles -- not just professional studio audio from a single reciter.
+- **Full Quran coverage.** All 6,236 verses, including short verses (3-4 words) that every approach currently struggles with.
 
 ## Current results
 
-Benchmarked on 54 samples (user recordings, professional reference audio, crowdsourced recordings). Results from `benchmark/results/latest.json`:
+Benchmarked on 54 samples (user recordings, professional reference audio, crowdsourced recordings):
 
 | Experiment | Approach | SeqAcc | Recall | Precision | Latency | Size |
 |---|---|---|---|---|---|---|
@@ -14,7 +24,22 @@ Benchmarked on 54 samples (user recordings, professional reference audio, crowds
 | tarteel-whisper-base | tarteel-ai/whisper-base-ar-quran + QuranDB | 67% | 72% | 75% | ~3s | 290 MB |
 | whisper-lora | Whisper-small + LoRA fine-tune + QuranDB | 58% | 64% | 65% | ~1.3s | 485 MB |
 
-Other experiments (embedding-search, contrastive, streaming-asr, new-models) have been evaluated qualitatively but aren't yet wired into the benchmark runner with the full corpus. See [Experiments](#experiments) below.
+None of these hit the target. CTC alignment is the most accurate but 6x over the size budget and 5x over the latency budget. The ASR-based approaches are smaller but top out at 72% recall because Arabic transcription quality is the bottleneck.
+
+## Next experiments
+
+Three parallel experiments designed to break through the accuracy/size/speed tradeoff:
+
+### Two-Stage Retrieval
+Moonshine Tiny Arabic (27M params, 103 MB) does fast ASR to get a rough transcript, then a small CTC model re-scores only the top 50 verse candidates. This bounds the expensive CTC computation to 50 candidates instead of 6,236, getting CTC-level accuracy at a fraction of the latency.
+
+### Distilled CTC
+wav2vec2-base (95M params, ~380 MB, target ~95 MB after int8 quantization) fine-tuned for Arabic CTC, then knowledge-distilled from the large model. Same CTC scoring approach as the current best, but 3x smaller. The teacher-student distillation transfers the large model's discriminative power into the small model's architecture.
+
+### Contrastive V2 (Audio Fingerprinting)
+CLIP-style contrastive model mapping audio to a speaker-invariant 256-dim embedding. Pre-computed FAISS index of all 6,236 verses. At inference: one forward pass + nearest neighbor search = verse ID. No ASR, no text matching. Key improvements over v1: wav2vec2-base encoder (cross-lingual, not English-only HuBERT), deeper projection heads, multi-reciter training data, proper batch sizes (64-128 on GPU).
+
+All three train on Modal A10G GPUs. Local Mac is inference-only.
 
 ## Project structure
 
@@ -25,11 +50,14 @@ shared/                  # Common utilities used by all experiments
   quran_db.py            # QuranDB - 6,236 verses, fuzzy match, multi-ayah spans
 
 experiments/             # Each approach gets its own directory
-  ctc-alignment/         # CTC forced alignment (best accuracy so far)
+  ctc-alignment/         # CTC forced alignment (current best, 81%)
+  two-stage/             # Moonshine ASR + CTC re-score (in progress)
+  distilled-ctc/         # wav2vec2-base knowledge-distilled (in progress)
+  contrastive-v2/        # QuranCLAP v2 audio fingerprinting (in progress)
   whisper-lora/          # Whisper-small + LoRA adapter
   tarteel-whisper-base/  # Tarteel's whisper-base-ar-quran
   embedding-search/      # HuBERT + FAISS nearest-neighbor
-  contrastive/           # QuranCLAP (HuBERT + AraBERT contrastive)
+  contrastive/           # QuranCLAP v1 (proof of concept)
   streaming-asr/         # mlx-whisper chunked streaming
   new-models/            # Multi-model benchmark (8 ASR models)
 
@@ -48,8 +76,11 @@ web/                     # Live demo
   server.py              # FastAPI backend
   frontend/              # React frontend
 
-scripts/                 # One-off training/eval scripts
-  train_modal.py         # LoRA training on Modal (A10G GPU)
+scripts/                 # Training scripts (Modal A10G GPU)
+  train_ctc_base_modal.py    # wav2vec2-base CTC fine-tuning (shared by two-stage + distilled-ctc)
+  train_distill_modal.py     # Knowledge distillation (large CTC -> small CTC)
+  train_contrastive_v2_modal.py  # QuranCLAP v2 contrastive training
+  train_modal.py         # LoRA training (whisper-lora experiment)
   train_lora.py          # Local training script (MPS/CUDA)
 
 docs/plans/              # Design docs and experiment plans
@@ -57,75 +88,68 @@ REPORT.md                # Full experiment report with cross-comparison
 RESEARCH-audio-to-verse.md  # Research notes on approaches
 ```
 
-## Experiments
+## All experiments
 
-### ctc-alignment (best)
+### ctc-alignment (current best -- 81% accuracy, 1.2 GB)
 
-CTC forced alignment using a pre-trained Arabic wav2vec2 model. Instead of decoding to text and then matching, this approach scores candidate verses directly against the model's frame-level character logits using the CTC forward algorithm.
+CTC forced alignment using a pre-trained Arabic wav2vec2 model. Scores candidate verses directly against frame-level character logits using the CTC forward algorithm, bypassing the information loss of greedy decoding.
 
-**Flow:** audio -> wav2vec2 frame logits -> greedy decode -> Levenshtein top-100 candidates -> length-normalized CTC re-score -> multi-verse span scoring for top surahs -> best score wins
+**Flow:** audio -> wav2vec2 frame logits -> greedy decode -> Levenshtein top-100 candidates -> CTC re-score -> multi-verse span scoring -> best score wins
 
-- **Seq Accuracy:** 81% (44/54)
-- **Recall / Precision:** 83% / 83%
-- **Latency:** ~5s (median 0.9s for single-verse)
-- **Model:** `jonatasgrosman/wav2vec2-large-xlsr-53-arabic` fine-tuned on Buraaq/quran-md-ayahs (1.2 GB)
+- **Model:** `jonatasgrosman/wav2vec2-large-xlsr-53-arabic` (1.2 GB)
+- **Gap to target:** Accurate enough to prove the approach works, but too large (6x) and too slow (5x) for on-device use.
 
-### whisper-lora
+### two-stage (in progress)
 
-Whisper-small fine-tuned with a LoRA adapter on Quranic audio (EveryAyah + RetaSy datasets). Transcribes audio to Arabic text, then fuzzy-matches against QuranDB.
+Moonshine Tiny Arabic (27M) for fast ASR, then CTC forced-alignment re-scoring on just the top 50 candidates. Bounds the expensive CTC computation from 6,236 verses to 50.
 
-- **Seq Accuracy:** 58%
-- **Latency:** ~1.3s
-- **Model:** openai/whisper-small (461 MB) + LoRA adapter (21 MB)
-- **Training:** 3,000 steps on A10G GPU (Modal), ~53 minutes
+- **Stage 1:** Moonshine Tiny Arabic (103 MB) -> transcript -> QuranDB.search(top_k=50)
+- **Stage 2:** wav2vec2-base CTC (target ~95 MB after quantization) -> re-score 50 candidates
+- **Target size:** ~200 MB combined
+- **Requires:** Modal-trained wav2vec2-base CTC model (`scripts/train_ctc_base_modal.py`)
 
-### tarteel-whisper-base
+### distilled-ctc (in progress)
 
-Tarteel's Whisper-base model fine-tuned specifically for Quranic Arabic. Same transcribe-then-match pipeline as whisper-lora but using a purpose-built model.
+wav2vec2-base (95M params) with knowledge distillation from the large CTC model. Same scoring approach as ctc-alignment but 3x smaller.
 
-- **Seq Accuracy:** 67%
-- **Latency:** ~3s
-- **Model:** `tarteel-ai/whisper-base-ar-quran` (290 MB)
+- **Teacher:** wav2vec2-large-xlsr-53-arabic (315M params, 1.2 GB)
+- **Student:** wav2vec2-base + Arabic CTC head (95M params, ~380 MB, target ~95 MB int8)
+- **Loss:** alpha * CTC(student, ground_truth) + (1-alpha) * KL(student || teacher)
+- **Requires:** Modal training (`scripts/train_ctc_base_modal.py`, then `scripts/train_distill_modal.py`)
 
-### embedding-search
+### contrastive-v2 (in progress)
 
-Audio fingerprinting via HuBERT embeddings + FAISS index. Pre-computes embeddings for all 6,236 verses (Alafasy recitation), then finds nearest neighbor at inference time.
+CLIP-style contrastive model (QuranCLAP v2). Maps audio to a speaker-invariant 256-dim embedding, matched against a pre-computed FAISS index of all 6,236 verses. One forward pass + nearest neighbor = verse ID. No ASR needed.
 
-- **Same-reciter accuracy:** 100% (5/5 reference audio)
-- **Cross-speaker accuracy:** 0% (0/2 user recordings)
-- **Latency:** ~377ms (embedding extraction dominates, FAISS search is <1ms)
-- **Verdict:** Not viable standalone -- HuBERT embeddings encode speaker identity more than linguistic content. Could work as a supplementary signal for known reciters.
+- **Audio encoder:** wav2vec2-base (cross-lingual, not English-only HuBERT like v1)
+- **Text encoder:** AraBERT v02
+- **Training:** Multi-reciter EveryAyah data, batch size 64-128, two-phase (frozen -> unfreeze last 2 layers)
+- **Target size:** ~367 MB (audio encoder + projection + FAISS index)
+- **Requires:** Modal training (`scripts/train_contrastive_v2_modal.py`)
 
-### contrastive (QuranCLAP)
+### tarteel-whisper-base (67% accuracy, 290 MB)
 
-CLIP-style contrastive model mapping Quran audio (HuBERT) and Arabic text (AraBERT) into a shared 256-dim embedding space. Proof of concept with Phase 1 training only (frozen encoders, projection heads).
+Tarteel's Whisper-base fine-tuned for Quranic Arabic. Transcribe-then-match pipeline.
 
-- **Retrieval accuracy:** ~1.6% top-10 on 789 candidates
-- **Why it doesn't work yet:** English HuBERT on Arabic audio, batch size 4, single reciter, minimal training data
-- **What would fix it:** Arabic speech encoder, multi-reciter data (Quran-MD), GPU training with batch size 256+, 100+ epochs
+### whisper-lora (58% accuracy, 485 MB)
 
-### streaming-asr
+Whisper-small + LoRA adapter fine-tuned on EveryAyah + RetaSy. Transcribe-then-match pipeline.
 
-Processes audio in 1-3 second chunks with mlx-whisper, accumulates transcription progressively, matches verses in real-time with prefix-aware Levenshtein scoring.
+### embedding-search (not viable standalone)
 
-- **Best accuracy:** 43% (3/7, stream_2s mode, smaller test set)
-- **Time to first match:** 0.19s (stream_3s) vs 1.17s (batch)
-- **Key finding:** Streaming is 6x faster to first match. Accuracy is limited by whisper-base Arabic quality, not the chunking approach. 2-3 second chunks are optimal.
+HuBERT embeddings + FAISS nearest neighbor. 100% same-reciter, 0% cross-speaker. HuBERT encodes speaker identity more than linguistic content.
 
-### new-models
+### contrastive v1 (proof of concept, ~1.6% accuracy)
 
-Benchmarks 8 different ASR models head-to-head on the same test set:
+First attempt at CLIP-style audio-text matching. Failed due to English HuBERT on Arabic audio, batch size 4, single reciter. Contrastive-v2 addresses all of these.
 
-| Model | Accuracy (7 samples) | Avg Latency | Size |
-|---|---|---|---|
-| Moonshine Tiny Arabic | 3/7 | 1.26s | 103 MB |
-| Whisper Large-v3-Turbo | 3/7 | 2.04s | 3.1 GB |
-| Tarteel Whisper Base | 3/7 | 2.08s | 277 MB |
-| MMS-1B-All (Arabic) | 3/7 | 4.01s | 3.7 GB |
-| Distil-Whisper Large-v3 | 0/7 | 1.66s | 2.9 GB |
-| SeamlessM4T-v2 Large | 0/7 | 17.32s | 5.7 GB |
+### streaming-asr (43% accuracy, 6x faster to first match)
 
-Moonshine Tiny Arabic is the efficiency winner -- 30x smaller than Whisper-turbo, fastest inference, same accuracy.
+mlx-whisper chunked streaming. Streaming is good for UX (0.19s to first match) but accuracy is limited by whisper-base quality.
+
+### new-models (model comparison)
+
+Head-to-head benchmark of 8 ASR models. Key finding: Moonshine Tiny Arabic (103 MB) matches Whisper Large-v3-Turbo (3.1 GB) at 30x smaller. This is why the two-stage experiment uses Moonshine as Stage 1.
 
 ## Test corpus
 
@@ -214,15 +238,15 @@ Some experiments have additional dependencies (faiss-cpu, moonshine, mlx-whisper
 
 ## Key findings
 
-1. **CTC forced alignment is the best approach so far** -- scoring candidates directly against frame logits avoids the information loss of greedy decoding, giving 81% sequence accuracy.
+1. **CTC forced alignment is the most accurate approach** -- scoring candidates directly against frame logits avoids the information loss of greedy decoding, giving 81% accuracy. But the model is too large (1.2 GB) for on-device deployment.
 
-2. **ASR quality is the bottleneck, not matching.** All ASR-based approaches fail on the same samples. Better Arabic transcription (larger models, Quran-specific fine-tuning) would improve all of them.
+2. **ASR quality is the bottleneck for transcribe-then-match approaches.** All ASR-based approaches fail on the same samples. The two-stage experiment sidesteps this by using ASR only for candidate retrieval, then CTC for the final decision.
 
-3. **Embedding search is speaker-dependent.** 100% for same-reciter, 0% for different speakers. Not viable standalone, but could supplement ASR for known voices.
+3. **Embedding search needs speaker invariance.** HuBERT embeddings encode speaker identity more than linguistic content (100% same-reciter, 0% cross-speaker). Contrastive-v2 addresses this with multi-reciter contrastive training.
 
-4. **Streaming works for UX, not accuracy.** The chunked approach gets a verse match 6x faster but doesn't improve correctness. Pair with a better model for production use.
+4. **Small models can match large ones.** Moonshine Tiny Arabic (103 MB) matches Whisper Large-v3-Turbo (3.1 GB) on our benchmark. Knowledge distillation should transfer the large CTC model's accuracy into a base-sized model.
 
-5. **Short verses are hard across all approaches.** Verses under 3-4 words don't provide enough signal for any method. Needs minimum-length gating or surah-context bias.
+5. **Short verses are hard across all approaches.** Verses under 3-4 words don't provide enough signal. May need minimum-length gating or surah-context bias in the final product.
 
 ## Further reading
 
