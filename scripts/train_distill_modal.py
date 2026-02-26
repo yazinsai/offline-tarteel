@@ -20,7 +20,7 @@ image = (
     .apt_install("ffmpeg")
     .pip_install(
         "torch",
-        "transformers>=4.40",
+        "transformers>=4.40,<5",
         "datasets>=3.0,<4.0",
         "accelerate",
         "soundfile",
