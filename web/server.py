@@ -1,22 +1,26 @@
 """
-WebSocket backend for real-time Quran recitation tracking.
+WebSocket backend for real-time Quran verse recognition.
 
-Uses a growing-window approach: keeps all audio and re-transcribes
-a larger window each time, giving Whisper more context for better
-Arabic accuracy. Matches verses sequentially within a locked surah.
+Uses NVIDIA FastConformer (NeMo) for Arabic ASR with a rolling
+audio window. Matches transcripts against QuranDB and sends
+verse_match or raw_transcript messages to the frontend.
 """
 
 import asyncio
 import logging
+import os
 import sys
+import tempfile
+import types
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 import numpy as np
+import soundfile as sf
 import torch
 import uvicorn
-from Levenshtein import ratio as lev_ratio
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 # ---------------------------------------------------------------------------
@@ -25,30 +29,34 @@ from fastapi.staticfiles import StaticFiles
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from shared.quran_db import QuranDB
 from shared.normalizer import normalize_arabic
+from shared.quran_db import QuranDB
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 SAMPLE_RATE = 16000
-TRIGGER_SECONDS = 3.0           # process every N seconds of new audio
+TRIGGER_SECONDS = 2.0
 TRIGGER_SAMPLES = int(SAMPLE_RATE * TRIGGER_SECONDS)
-MAX_WINDOW_SECONDS = 30.0       # max audio to keep in window
+MAX_WINDOW_SECONDS = 10.0
 MAX_WINDOW_SAMPLES = int(SAMPLE_RATE * MAX_WINDOW_SECONDS)
-BASE_MODEL = "openai/whisper-small"
-LORA_ADAPTER = str(PROJECT_ROOT / "data" / "lora-adapter-small")
 SILENCE_RMS_THRESHOLD = 0.005
-PORT = 8765
+PORT = 8000
 
 # Matching thresholds
-LOCK_CONFIDENCE = 0.55
-DISPLAY_CONFIDENCE = 0.45
-ADVANCE_COVERAGE = 0.65
-ADVANCE_CONFIDENCE = 0.50
-MIN_WORDS_FOR_LOCK = 5          # need 5+ input words before locking to a surah
-LOCK_STREAK_REQUIRED = 3        # same surah must win N consecutive global searches
-MAX_SKIP_AYAHS = 3              # max ayahs to skip-complete on a jump
+VERSE_MATCH_THRESHOLD = 0.45
+RAW_TRANSCRIPT_THRESHOLD = 0.25
+SURROUNDING_CONTEXT = 2  # verses before/after current
+
+# Model config
+NVIDIA_MODEL_ID = "nvidia/stt_ar_fastconformer_hybrid_large_pcd_v1.0"
+LOCAL_MODEL_DIR = Path(
+    os.getenv(
+        "NVIDIA_FASTCONFORMER_LOCAL_MODEL_DIR",
+        str(PROJECT_ROOT / "data" / "nvidia-fastconformer-ar"),
+    )
+)
+DECODER_TYPE = os.getenv("NVIDIA_FASTCONFORMER_DECODER", "ctc")
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -63,257 +71,194 @@ log = logging.getLogger("tarteel-ws")
 # Globals
 # ---------------------------------------------------------------------------
 quran_db: QuranDB | None = None
-whisper_model = None
-whisper_processor = None
-device = None
+_nemo_model = None
 
 
-def _load_model():
-    global whisper_model, whisper_processor, device
-    if whisper_model is not None:
+# ---------------------------------------------------------------------------
+# FastConformer model loading
+# ---------------------------------------------------------------------------
+def _install_kaldialign_fallback() -> None:
+    """Install a tiny kaldialign-compatible fallback when package is absent.
+
+    NeMo imports kaldialign in context-biasing utilities, even for inference
+    flows that do not use those codepaths. This fallback unblocks model import.
+    """
+    try:
+        import kaldialign  # noqa: F401
+        return
+    except Exception:
+        pass
+
+    def align(ref, hyp, eps="<eps>"):
+        ref = list(ref)
+        hyp = list(hyp)
+        n, m = len(ref), len(hyp)
+        dp = [[0] * (m + 1) for _ in range(n + 1)]
+        bt = [[None] * (m + 1) for _ in range(n + 1)]
+        for i in range(1, n + 1):
+            dp[i][0] = i
+            bt[i][0] = "D"
+        for j in range(1, m + 1):
+            dp[0][j] = j
+            bt[0][j] = "I"
+        for i in range(1, n + 1):
+            for j in range(1, m + 1):
+                cost = 0 if ref[i - 1] == hyp[j - 1] else 1
+                sub = dp[i - 1][j - 1] + cost
+                ins = dp[i][j - 1] + 1
+                delete = dp[i - 1][j] + 1
+                best = min(sub, ins, delete)
+                dp[i][j] = best
+                if best == sub:
+                    bt[i][j] = "S"
+                elif best == ins:
+                    bt[i][j] = "I"
+                else:
+                    bt[i][j] = "D"
+        out = []
+        i, j = n, m
+        while i > 0 or j > 0:
+            move = bt[i][j]
+            if move == "S":
+                out.append((ref[i - 1], hyp[j - 1]))
+                i -= 1
+                j -= 1
+            elif move == "I":
+                out.append((eps, hyp[j - 1]))
+                j -= 1
+            else:
+                out.append((ref[i - 1], eps))
+                i -= 1
+        out.reverse()
+        return out
+
+    mod = types.ModuleType("kaldialign")
+    mod.align = align
+    sys.modules["kaldialign"] = mod
+
+
+def _extract_text(result) -> str:
+    if isinstance(result, str):
+        return result
+    if hasattr(result, "text"):
+        return result.text
+    return str(result)
+
+
+def _load_fastconformer():
+    global _nemo_model
+    if _nemo_model is not None:
         return
 
-    from transformers import WhisperProcessor, WhisperForConditionalGeneration
-    from peft import PeftModel
+    _install_kaldialign_fallback()
+    os.environ.setdefault("NEMO_LOG_LEVEL", "ERROR")
 
-    if torch.backends.mps.is_available():
-        device = torch.device("mps")
-    elif torch.cuda.is_available():
-        device = torch.device("cuda")
-    else:
-        device = torch.device("cpu")
+    try:
+        from nemo.collections.asr.models import EncDecHybridRNNTCTCBPEModel
+        from nemo.utils import logging as nemo_logging
+    except ImportError as exc:
+        raise ImportError(
+            "NeMo ASR dependencies required. Install with: "
+            "pip install 'nemo_toolkit[asr]'"
+        ) from exc
 
-    log.info("Loading whisper-small + LoRA adapter on %s...", device)
-    whisper_processor = WhisperProcessor.from_pretrained(
-        BASE_MODEL, language="arabic", task="transcribe"
-    )
-    base = WhisperForConditionalGeneration.from_pretrained(BASE_MODEL)
-    whisper_model = PeftModel.from_pretrained(base, LORA_ADAPTER)
-    whisper_model = whisper_model.to(device)
-    whisper_model.eval()
-    log.info("Model loaded: %s + %s", BASE_MODEL, LORA_ADAPTER)
+    nemo_logging.set_verbosity(nemo_logging.ERROR)
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    source = str(LOCAL_MODEL_DIR) if LOCAL_MODEL_DIR.exists() else NVIDIA_MODEL_ID
+    log.info("Loading FastConformer from %s on %s...", source, device)
+
+    try:
+        _nemo_model = EncDecHybridRNNTCTCBPEModel.from_pretrained(
+            model_name=source,
+            map_location=device,
+        )
+    except Exception:
+        if LOCAL_MODEL_DIR.exists():
+            nemo_files = sorted(LOCAL_MODEL_DIR.glob("*.nemo"))
+            if not nemo_files:
+                raise
+            _nemo_model = EncDecHybridRNNTCTCBPEModel.restore_from(
+                str(nemo_files[0]),
+                map_location=device,
+            )
+        else:
+            raise
+
+    _nemo_model.eval()
+    try:
+        _nemo_model.change_decoding_strategy(decoder_type=DECODER_TYPE)
+    except Exception:
+        pass
+
+    log.info("FastConformer loaded successfully")
 
 
+# ---------------------------------------------------------------------------
+# Audio processing
+# ---------------------------------------------------------------------------
 def _transcribe(audio: np.ndarray) -> str:
-    """Transcribe audio using the finetuned model."""
-    _load_model()
+    """Transcribe audio array using FastConformer."""
+    _load_fastconformer()
 
     if len(audio) < SAMPLE_RATE:
         audio = np.pad(audio, (0, SAMPLE_RATE - len(audio)))
 
-    inputs = whisper_processor(
-        audio, sampling_rate=SAMPLE_RATE, return_tensors="pt"
-    )
-    input_features = inputs.input_features.to(device)
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+        tmp_path = Path(tmp.name)
 
-    with torch.no_grad():
-        predicted_ids = whisper_model.generate(
-            input_features,
-            max_new_tokens=225,
-            repetition_penalty=1.2,
-            language="ar",
-            task="transcribe",
-        )
+    try:
+        sf.write(str(tmp_path), audio, SAMPLE_RATE)
 
-    text = whisper_processor.batch_decode(
-        predicted_ids, skip_special_tokens=True
-    )[0].strip()
+        try:
+            outputs = _nemo_model.transcribe(
+                audio=[str(tmp_path)],
+                batch_size=1,
+                return_hypotheses=True,
+                verbose=False,
+            )
+        except TypeError:
+            outputs = _nemo_model.transcribe(
+                paths2audio_files=[str(tmp_path)],
+                batch_size=1,
+                return_hypotheses=True,
+            )
 
-    # Filter hallucinations
-    words = text.split()
-    if len(words) >= 3:
-        for i in range(len(words) - 2):
-            if words[i] == words[i + 1] == words[i + 2]:
-                return ""
-    if len(words) > 50:
-        return ""
-    return text
+        if isinstance(outputs, tuple):
+            outputs = outputs[0]
+        if isinstance(outputs, list) and outputs:
+            transcript = _extract_text(outputs[0])
+        else:
+            transcript = _extract_text(outputs)
+
+        return normalize_arabic(transcript)
+    finally:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except Exception:
+            pass
 
 
 def _is_silence(audio: np.ndarray) -> bool:
-    rms = float(np.sqrt(np.mean(audio ** 2)))
+    rms = float(np.sqrt(np.mean(audio**2)))
     return rms < SILENCE_RMS_THRESHOLD
 
 
-# ---------------------------------------------------------------------------
-# Sequential Recitation Tracker
-# ---------------------------------------------------------------------------
-class SequentialTracker:
-    """
-    Track Quran recitation sequentially within a surah.
-
-    Phase 1 (unlocked): Global search every cycle. The same surah must win
-                         LOCK_STREAK_REQUIRED consecutive searches before locking.
-    Phase 2 (locked):   Only match against current + next few ayahs.
-                         Never switches surah. Stays locked until silence reset.
-    """
-
-    def __init__(self, db: QuranDB):
-        self.db = db
-        self.locked_surah: int | None = None
-        self.current_ayah: int = 1
-        self.current_text: str = ""
-        # Track consecutive wins for the same surah before locking
-        self._candidate_surah: int | None = None
-        self._candidate_streak: int = 0
-
-    def reset_verse(self):
-        self.current_text = ""
-
-    def reset_all(self):
-        self.locked_surah = None
-        self.current_ayah = 1
-        self.current_text = ""
-        self._candidate_surah = None
-        self._candidate_streak = 0
-
-    def update_from_text(self, full_text: str) -> dict | None:
-        """Replace accumulated text with full transcription and match."""
-        self.current_text = normalize_arabic(full_text)
-        words = self.current_text.split()
-
-        if len(words) < 2:
-            return None
-
-        if self.locked_surah:
-            return self._match_in_surah(self.current_text)
-        else:
-            return self._match_global(self.current_text)
-
-    def _score_verse(self, text: str, verse: dict) -> float:
-        """Score a verse against input text using prefix/full blend."""
-        input_words = text.split()
-        n = len(input_words)
-        verse_words = verse["text_clean"].split()
-
-        prefix_len = min(n, len(verse_words))
-        verse_prefix = " ".join(verse_words[:prefix_len])
-        prefix_score = lev_ratio(text, verse_prefix)
-        full_score = lev_ratio(text, verse["text_clean"])
-
-        coverage = n / max(len(verse_words), 1)
-        if coverage > 0.7:
-            return 0.3 * prefix_score + 0.7 * full_score
-        else:
-            return 0.7 * prefix_score + 0.3 * full_score
-
-    def _match_global(self, text: str) -> dict | None:
-        best = None
-        best_score = 0.0
-
-        input_words = text.split()
-        n = len(input_words)
-
-        for v in self.db.verses:
-            score = self._score_verse(text, v)
-            if score > best_score:
-                best_score = score
-                best = {**v, "score": score}
-
-        if not best or best_score < DISPLAY_CONFIDENCE:
-            return None
-
-        # Track consecutive wins for locking
-        if best["surah"] == self._candidate_surah:
-            self._candidate_streak += 1
-        else:
-            self._candidate_surah = best["surah"]
-            self._candidate_streak = 1
-            log.info(
-                "New candidate surah %d (%s) ayah %d (conf=%.3f, words=%d)",
-                best["surah"], best["surah_name_en"], best["ayah"],
-                best_score, n,
+def _get_surrounding_verses(db: QuranDB, surah: int, ayah: int) -> list[dict]:
+    """Get surrounding verses for context display."""
+    verses = db.get_surah(surah)
+    result = []
+    for v in verses:
+        if abs(v["ayah"] - ayah) <= SURROUNDING_CONTEXT:
+            result.append(
+                {
+                    "surah": v["surah"],
+                    "ayah": v["ayah"],
+                    "text": v["text_uthmani"],
+                    "is_current": v["ayah"] == ayah,
+                }
             )
-
-        # Lock only after enough consecutive wins AND enough words
-        can_lock = (
-            n >= MIN_WORDS_FOR_LOCK
-            and best_score >= LOCK_CONFIDENCE
-            and self._candidate_streak >= LOCK_STREAK_REQUIRED
-        )
-        if can_lock:
-            self.locked_surah = best["surah"]
-            self.current_ayah = best["ayah"]
-            log.info(
-                "LOCKED to surah %d (%s) ayah %d "
-                "(conf=%.3f, words=%d, streak=%d)",
-                self.locked_surah, best["surah_name_en"],
-                self.current_ayah, best_score, n,
-                self._candidate_streak,
-            )
-
-        return self._build_result(best, text)
-
-    def _match_in_surah(self, text: str) -> dict | None:
-        surah_verses = self.db.get_surah(self.locked_surah)
-        if not surah_verses:
-            return None
-
-        input_words = text.split()
-        n = len(input_words)
-
-        start_idx = max(0, self.current_ayah - 1)
-        end_idx = min(start_idx + 4, len(surah_verses))
-        candidates = surah_verses[start_idx:end_idx]
-
-        best = None
-        best_score = 0.0
-
-        for v in candidates:
-            verse_words = v["text_clean"].split()
-            prefix_len = min(n, len(verse_words))
-            verse_prefix = " ".join(verse_words[:prefix_len])
-            prefix_score = lev_ratio(text, verse_prefix)
-            full_score = lev_ratio(text, v["text_clean"])
-
-            coverage = n / max(len(verse_words), 1)
-            if coverage > 0.7:
-                score = 0.3 * prefix_score + 0.7 * full_score
-            else:
-                score = 0.8 * prefix_score + 0.2 * full_score
-
-            if score > best_score:
-                best_score = score
-                best = {**v, "score": score}
-
-        if best and best_score >= DISPLAY_CONFIDENCE:
-            self.current_ayah = best["ayah"]
-            return self._build_result(best, text)
-
-        return None
-
-    def _build_result(self, verse: dict, text: str) -> dict:
-        verse_words_clean = verse["text_clean"].split()
-        verse_words_uthmani = verse["text_uthmani"].split()
-        input_words = text.split()
-
-        position = self._find_position(input_words, verse_words_clean)
-        total = len(verse_words_uthmani)
-        coverage = position / total if total > 0 else 0
-
-        return {
-            "surah": verse["surah"],
-            "ayah": verse["ayah"],
-            "surah_name_en": verse["surah_name_en"],
-            "text_uthmani": verse["text_uthmani"],
-            "words": verse_words_uthmani,
-            "word_position": position,
-            "total_words": total,
-            "confidence": round(verse["score"], 4),
-            "progress_pct": round(coverage * 100, 1),
-        }
-
-    @staticmethod
-    def _find_position(input_words: list[str], verse_words: list[str]) -> int:
-        verse_idx = 0
-        for inp_word in input_words:
-            if verse_idx >= len(verse_words):
-                break
-            if lev_ratio(inp_word, verse_words[verse_idx]) >= 0.5:
-                verse_idx += 1
-            elif verse_idx + 1 < len(verse_words) and lev_ratio(inp_word, verse_words[verse_idx + 1]) >= 0.5:
-                verse_idx += 2
-        return verse_idx
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -324,47 +269,33 @@ async def lifespan(application: FastAPI):
     global quran_db
     quran_db = QuranDB()
     log.info("QuranDB loaded: %d verses", quran_db.total_verses)
+    _load_fastconformer()
     yield
 
 
-app = FastAPI(title="Offline Tarteel", docs_url=None, redoc_url=None, lifespan=lifespan)
+app = FastAPI(
+    title="Offline Tarteel",
+    docs_url=None,
+    redoc_url=None,
+    lifespan=lifespan,
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket):
     await ws.accept()
-    log.info("WebSocket connected: %s", ws.client)
+    log.info("Client connected: %s", ws.client)
 
-    tracker = SequentialTracker(quran_db)
-    completed: list[dict] = []
-    last_status: str | None = None
-    last_completed_ayah = 0
-
-    # Growing audio window
-    full_audio = np.empty(0, dtype=np.float32)     # all audio for current verse
-    new_audio_count = 0                             # samples since last transcription
-    prev_transcription = ""                         # to detect when transcription changes
-
-    async def send_status(status: str):
-        nonlocal last_status
-        if status != last_status:
-            await ws.send_json({"type": "status", "status": status})
-            last_status = status
-
-    def complete_ayah(surah: int, ayah: int):
-        nonlocal last_completed_ayah
-        if ayah <= last_completed_ayah:
-            return
-        v = quran_db.get_verse(surah, ayah)
-        if v:
-            completed.append({
-                "surah": surah,
-                "ayah": ayah,
-                "text_uthmani": v["text_uthmani"],
-                "surah_name_en": v["surah_name_en"],
-            })
-            last_completed_ayah = ayah
-            log.info("Completed: %s %d:%d", v["surah_name_en"], surah, ayah)
+    full_audio = np.empty(0, dtype=np.float32)
+    new_audio_count = 0
+    last_emitted_ref: tuple[int, int] | None = None
 
     try:
         while True:
@@ -373,131 +304,106 @@ async def websocket_endpoint(ws: WebSocket):
             full_audio = np.concatenate([full_audio, samples])
             new_audio_count += len(samples)
 
-            # Trim window to max size (keep latest audio)
+            # Trim to max window (keep latest audio)
             if len(full_audio) > MAX_WINDOW_SAMPLES:
                 full_audio = full_audio[-MAX_WINDOW_SAMPLES:]
 
-            # Only process when we have enough new audio
+            # Only process when enough new audio has accumulated
             if new_audio_count < TRIGGER_SAMPLES:
                 continue
             new_audio_count = 0
 
-            # Check if latest chunk is silence
+            # Skip silent chunks
             tail = full_audio[-TRIGGER_SAMPLES:]
             if _is_silence(tail):
-                await send_status("silence")
                 continue
 
-            await send_status("listening")
-
-            # Transcribe the FULL audio window (growing window approach)
+            # Transcribe the full audio window
             text = await asyncio.get_event_loop().run_in_executor(
                 None, _transcribe, full_audio.copy()
             )
 
-            if not text:
+            if not text or not text.strip():
                 continue
 
             log.info(
-                "Transcribed (%.1fs audio): %s",
+                "Transcribed (%.1fs): %s",
                 len(full_audio) / SAMPLE_RATE,
-                text[:150],
+                text[:120],
             )
 
-            # Remember expected ayah before update
-            expected_ayah = tracker.current_ayah if tracker.locked_surah else None
-
-            # Feed FULL transcription to tracker (replaces, not appends)
-            result = tracker.update_from_text(text)
-            if result is None:
-                log.info("No match")
-                continue
-
-            log.info(
-                "Match: %s %d:%d conf=%.3f pos=%d/%d locked=%s",
-                result["surah_name_en"], result["surah"], result["ayah"],
-                result["confidence"], result["word_position"], result["total_words"],
-                tracker.locked_surah,
+            # Match against QuranDB (span-aware)
+            match = quran_db.match_verse(
+                text,
+                threshold=RAW_TRANSCRIPT_THRESHOLD,
+                max_span=4,
             )
 
-            matched_ayah = result["ayah"]
-            surah = result["surah"]
+            if match and match["score"] >= VERSE_MATCH_THRESHOLD:
+                ref = (match["surah"], match["ayah"])
 
-            # If match jumped ahead, auto-complete skipped ayahs (max MAX_SKIP_AYAHS)
-            skip_count = matched_ayah - expected_ayah if expected_ayah else 0
-            if (
-                tracker.locked_surah
-                and expected_ayah is not None
-                and 0 < skip_count <= MAX_SKIP_AYAHS
-            ):
-                for skip_ayah in range(expected_ayah, matched_ayah):
-                    log.info("Skip-completing %d:%d (jumped to %d)", surah, skip_ayah, matched_ayah)
-                    complete_ayah(surah, skip_ayah)
-                # Reset audio window for new verse
-                full_audio = tail.copy()  # keep just the latest chunk
-                tracker.reset_verse()
-                # Re-match with just the latest audio's text
-                text = await asyncio.get_event_loop().run_in_executor(
-                    None, _transcribe, full_audio.copy()
-                )
-                if text:
-                    result = tracker.update_from_text(text)
-                if not result:
-                    await ws.send_json({
-                        "type": "verse_update",
-                        "current": None,
-                        "completed": list(completed),
-                    })
+                # Dedup: skip if same verse was just sent
+                if ref == last_emitted_ref:
                     continue
 
-            # Check auto-advance
-            coverage = result["word_position"] / result["total_words"] if result["total_words"] else 0
-            if (
-                coverage >= ADVANCE_COVERAGE
-                and result["confidence"] >= ADVANCE_CONFIDENCE
-            ):
-                log.info(
-                    "Auto-advance: %s %d:%d → next ayah %d",
-                    result["surah_name_en"], result["surah"], result["ayah"],
-                    result["ayah"] + 1,
+                verse = quran_db.get_verse(match["surah"], match["ayah"])
+                surrounding = _get_surrounding_verses(
+                    quran_db, match["surah"], match["ayah"]
                 )
-                complete_ayah(result["surah"], result["ayah"])
-                tracker.current_ayah = result["ayah"] + 1
-                tracker.reset_verse()
-                # Reset audio window for next verse
-                full_audio = np.empty(0, dtype=np.float32)
-                new_audio_count = 0
 
-                await ws.send_json({
-                    "type": "verse_update",
-                    "current": result,
-                    "completed": list(completed),
-                })
-                continue
+                await ws.send_json(
+                    {
+                        "type": "verse_match",
+                        "surah": match["surah"],
+                        "ayah": match["ayah"],
+                        "verse_text": (
+                            verse["text_uthmani"] if verse else match.get("text", "")
+                        ),
+                        "surah_name": verse["surah_name"] if verse else "",
+                        "confidence": round(match["score"], 2),
+                        "surrounding_verses": surrounding,
+                    }
+                )
 
-            await ws.send_json({
-                "type": "verse_update",
-                "current": result,
-                "completed": list(completed),
-            })
+                last_emitted_ref = ref
+
+                # Reset window for next verse detection
+                full_audio = tail.copy()
+            else:
+                # Low confidence — send raw transcript
+                await ws.send_json(
+                    {
+                        "type": "raw_transcript",
+                        "text": text,
+                        "confidence": round(match["score"], 2) if match else 0.0,
+                    }
+                )
 
     except WebSocketDisconnect:
-        log.info("WebSocket disconnected: %s", ws.client)
+        log.info("Client disconnected: %s", ws.client)
     except Exception:
         log.exception("WebSocket error")
 
 
 # ---------------------------------------------------------------------------
-# Serve React frontend (if built)
+# Serve frontend (if built)
 # ---------------------------------------------------------------------------
 _frontend_dist = PROJECT_ROOT / "web" / "frontend" / "dist"
 if _frontend_dist.is_dir():
-    app.mount("/", StaticFiles(directory=str(_frontend_dist), html=True), name="frontend")
+    app.mount(
+        "/",
+        StaticFiles(directory=str(_frontend_dist), html=True),
+        name="frontend",
+    )
     log.info("Serving frontend from %s", _frontend_dist)
 else:
+
     @app.get("/")
     async def _root():
-        return {"status": "ok", "message": "Offline Tarteel backend. Frontend not built yet."}
+        return {
+            "status": "ok",
+            "message": "Offline Tarteel backend. Frontend not built yet.",
+        }
 
 
 if __name__ == "__main__":
