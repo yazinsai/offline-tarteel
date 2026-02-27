@@ -4,7 +4,7 @@ Offline Quran verse recognition. Record someone reciting, identify the surah and
 
 ## Goal
 
-Ship a model that runs on-device (phone or laptop) with **95%+ recall**, **sub-second latency**, and **under 200 MB** on disk. The current best approach (CTC forced alignment) hits 81% recall but weighs 1.2 GB and takes ~5s -- too large and too slow for a real product. Everything in this repo exists to close that gap.
+Ship a model that runs on-device (phone or laptop) with **95%+ recall**, **sub-second latency**, and **under 200 MB** on disk. The current best approach (`nvidia-fastconformer`) reaches **87% recall** at **115 MB** and **0.33s** latency, but still misses the 95% recall bar. Everything in this repo exists to close that final gap.
 
 ## Design constraints
 
@@ -18,21 +18,30 @@ Ship a model that runs on-device (phone or laptop) with **95%+ recall**, **sub-s
 
 Benchmarked on 54 samples (user recordings, professional reference audio, crowdsourced recordings):
 
+As of **February 26, 2026**, the table below reflects best full-corpus (54-sample) runs.
+
 | Experiment | Approach | SeqAcc | Recall | Precision | Latency | Size |
 |---|---|---|---|---|---|---|
-| **ctc-alignment** | wav2vec2 CTC forced alignment (fine-tuned) | **81%** | **83%** | **83%** | ~5s | 1.2 GB |
-| two-stage (large CTC) | Moonshine ASR → top-50 → large CTC re-score | 72% | 78% | 78% | ~7s | 1.3 GB |
+| **nvidia-fastconformer** | NeMo FastConformer transcript + span-aware QuranDB matching | **85%** | **87%** | **89%** | **0.33s** | **115 MB** |
+| **ctc-alignment** | wav2vec2 CTC forced alignment (large baseline) | 81% | 83% | 83% | 3.24s | 1.2 GB |
+| rabah-pruned-ctc/8-layer-ft-fn-int8 | Rabah Quran CTC, 8L first_n pruned + fine-tuned + int8 | **72%** | 74% | 73% | 7.02s | **145 MB** |
+| rabah-pruned-ctc/12-layer-ft-es-int8 | Rabah Quran CTC, 12L evenly_spaced pruned + fine-tuned + int8 | **72%** | 73% | 74% | 3.65s | 193 MB |
+| two-stage | Moonshine ASR + large CTC re-score | 72% | 73% | 74% | 9.48s | 1.3 GB |
+| two-stage-faster-whisper-pruned | faster-whisper Quran + fine-tuned pruned CTC re-score | 70% | 73% | 73% | 10.06s | 582 MB |
 | tarteel-whisper-base | tarteel-ai/whisper-base-ar-quran + QuranDB | 67% | 72% | 75% | ~3s | 290 MB |
 | whisper-lora | Whisper-small + LoRA fine-tune + QuranDB | 58% | 64% | 65% | ~1.3s | 485 MB |
-| contrastive-v2 | QuranCLAP v2 audio fingerprinting | failed | — | — | — | ~367 MB |
+| rabah-pruned-ctc/8-layer-ft-es-int8 | 8L evenly_spaced (wrong strategy) | 56% | 57% | 57% | 6.97s | 145 MB |
+| rabah-pruned-ctc/6-layer-ft-es-int8 | 6L evenly_spaced pruned + fine-tuned + int8 | 48% | 51% | 51% | 6.63s | 121 MB |
 
-None of these hit the target. CTC alignment is the most accurate but 6x over the size budget and 5x over the latency budget. Two-stage proves the retrieval+re-score approach works (72% with only 50 candidates vs 81% scoring all 6,236), but currently uses the same large CTC model for re-scoring so it's even bigger. The ASR-based approaches top out at 72% recall because Arabic transcription quality is the bottleneck. Contrastive v2 failed to learn meaningful audio-text alignment (see "What we tried").
+`nvidia-fastconformer` remains the best model overall. The **fine-tuned pruned Rabah models** are the major new result: `8-layer-ft-fn-int8` reaches **72% SeqAcc at 145 MB** (under the 200 MB target), up from 12% before fine-tuning. The `first_n` pruning strategy (keep layers 0-7) massively outperforms `evenly_spaced` (72% vs 56%), likely because contiguous early layers preserve better feature flow.
 
 ## Experiment status
 
-Three parallel experiments were designed to break through the accuracy/size/speed tradeoff. All three hit the same wall: **wav2vec2-base (English-only pretrained) cannot learn Arabic speech representations.** Training was done on Modal A100-80GB GPUs.
+- **NVIDIA FastConformer** is the top model: 85% SeqAcc, 115 MB, 0.33s latency.
+- **Rabah pruned+fine-tuned path now works.** Fine-tuning the CTC head on pruned representations recovered accuracy from 12% to 72% (8-layer first_n). The 8L int8 model is 145 MB -- well under the 200 MB target. The key insight: `first_n` pruning (keep layers 0-7) vastly outperforms `evenly_spaced` (72% vs 56%).
+- **Two-stage faster-whisper path** reaches 70% SeqAcc using the fine-tuned 8L CTC as Stage 2, but is still too large/slow (582 MB, 10s).
 
-### Two-Stage Retrieval (72% SeqAcc -- only working approach, but too large)
+### Two-Stage Retrieval (historical 72% setup; current pruned variant at 70%)
 Moonshine Tiny Arabic (27M params, 103 MB) does fast ASR to get a rough transcript, then CTC forced-alignment re-scores only the top 50 verse candidates. This bounds the expensive CTC computation to 50 candidates instead of 6,236. Currently falls back to the large CTC model (1.2 GB) because the small CTC model failed to train (see "What we tried"). With a working small CTC re-scorer (~95 MB), this would hit the size target.
 
 ### Distilled CTC (failed)
@@ -50,9 +59,12 @@ shared/                  # Common utilities used by all experiments
   quran_db.py            # QuranDB - 6,236 verses, fuzzy match, multi-ayah spans
 
 experiments/             # Each approach gets its own directory
-  ctc-alignment/         # CTC forced alignment (current best, 81%)
+  ctc-alignment/         # CTC forced alignment (strong baseline, 81%)
   two-stage/             # Moonshine ASR + CTC re-score (72%, large model fallback)
+  two-stage-faster-whisper-pruned/  # faster-whisper Quran + pruned CTC re-score
   distilled-ctc/         # wav2vec2-base knowledge-distilled (failed)
+  rabah-pruned-ctc/      # Rabah Quran CTC (12/8/6 + fine-tuned int8 variants)
+  nvidia-fastconformer/  # NeMo FastConformer Arabic benchmark
   contrastive-v2/        # QuranCLAP v2 audio fingerprinting (failed)
   whisper-lora/          # Whisper-small + LoRA adapter
   tarteel-whisper-base/  # Tarteel's whisper-base-ar-quran
@@ -76,11 +88,14 @@ web/                     # Live demo
   frontend/              # React frontend
 
 scripts/                 # Training scripts (Modal A100-80GB GPU)
-  train_ctc_base_modal.py    # wav2vec2-base CTC fine-tuning (failed -- see "What we tried")
-  train_distill_modal.py     # Knowledge distillation (blocked on CTC base)
-  train_contrastive_v2_modal.py  # QuranCLAP v2 contrastive training (in progress)
-  train_modal.py         # LoRA training (whisper-lora experiment)
-  train_lora.py          # Local LoRA training script (MPS/CUDA)
+  train_pruned_ctc_modal.py    # Fine-tune pruned Rabah CTC models (the key training script)
+  quantize_pruned_models.py    # PyTorch/ONNX int8 quantization
+  build_rabah_pruned_models.py # Build naive-pruned Rabah checkpoints
+  train_ctc_base_modal.py      # wav2vec2-base CTC fine-tuning (failed -- see "What we tried")
+  train_distill_modal.py       # Knowledge distillation (blocked on CTC base)
+  train_contrastive_v2_modal.py  # QuranCLAP v2 contrastive training
+  train_modal.py               # LoRA training (whisper-lora experiment)
+  train_lora.py                # Local LoRA training script (MPS/CUDA)
 
 docs/plans/              # Design docs and experiment plans
 REPORT.md                # Full experiment report with cross-comparison
@@ -89,7 +104,7 @@ RESEARCH-audio-to-verse.md  # Research notes on approaches
 
 ## All experiments
 
-### ctc-alignment (current best -- 81% accuracy, 1.2 GB)
+### ctc-alignment (strong baseline -- 81% accuracy, 1.2 GB)
 
 CTC forced alignment using a pre-trained Arabic wav2vec2 model. Scores candidate verses directly against frame-level character logits using the CTC forward algorithm, bypassing the information loss of greedy decoding.
 
@@ -115,6 +130,34 @@ wav2vec2-base (95M params) with knowledge distillation from the large CTC model.
 - **Teacher:** wav2vec2-large-xlsr-53-arabic (315M params, 1.2 GB)
 - **Student:** wav2vec2-base + Arabic CTC head (95M params, ~380 MB, target ~95 MB int8)
 - **Status:** Blocked. The student model (wav2vec2-base) can't learn Arabic CTC -- English-only pretraining means no Arabic speech representations to build on. See "What we tried" below.
+
+### rabah-pruned-ctc (fine-tuned variants are the key result)
+
+Rabah's Quran-specific wav2vec2-large checkpoint, layer-pruned and fine-tuned for small on-device CTC alignment.
+
+- **Source model:** `rabah2026/wav2vec2-large-xlsr-53-arabic-quran-v_final` (24 layers, 1.2 GB)
+- **Scoring:** Same CTC forced-alignment stack as `ctc-alignment`
+- **Fine-tuned variants:** `8-layer-ft-fn-int8` (72%, 145 MB), `12-layer-ft-es-int8` (72%, 193 MB), `8-layer-ft-es-int8` (56%, 145 MB), `6-layer-ft-es-int8` (48%, 121 MB)
+- **Naive-pruned baselines:** `12/8/6-layer-int8` (accuracy collapses without fine-tuning -- CTC head was trained on layer-24 representations)
+- **Training:** `scripts/train_pruned_ctc_modal.py` on Modal A100-80GB. 5000 steps, LR 3e-5, EveryAyah + RetaSy, freeze CNN + lower half of transformer.
+- **Key finding:** `first_n` pruning (keep layers 0-7) gets 72% vs 56% for `evenly_spaced` (keep layers 0,3,7,10,13,16,20,23). Contiguous early layers preserve better feature propagation.
+
+### nvidia-fastconformer (new)
+
+Arabic FastConformer hybrid model via NeMo:
+
+- **Model:** `nvidia/stt_ar_fastconformer_hybrid_large_pcd_v1.0`
+- **Pipeline:** audio -> FastConformer transcript -> QuranDB span-aware match
+- **Dependency:** `nemo_toolkit[asr]` (optional extra `.[nemo]`)
+
+### two-stage-faster-whisper-pruned (new)
+
+Two-stage retrieval variant using faster-whisper for ASR and fine-tuned pruned CTC for re-scoring:
+
+- **Stage 1:** `OdyAsh/faster-whisper-base-ar-quran` (147 MB, CTranslate2 int8)
+- **Stage 2:** CTC re-score top-50 candidates using fine-tuned 8L Rabah CTC (435 MB fp32)
+- **Result:** 70% SeqAcc / 73% recall / 73% precision, 10s latency, 582 MB total
+- **Bottleneck:** Stage 2 CTC model is still large; would benefit from int8 quantization or further pruning
 
 ### contrastive-v2 (failed -- val accuracy stuck at 9%)
 
@@ -174,11 +217,34 @@ source .venv/bin/activate
 # Run a single experiment
 .venv/bin/python -m benchmark.runner --experiment ctc-alignment
 
+# Run Rabah pruned variants (expanded via list_models)
+.venv/bin/python -m benchmark.runner --experiment rabah-pruned-ctc
+.venv/bin/python -m benchmark.runner --experiment rabah-pruned-ctc/8-layer-int8
+
+# Run new two-stage faster-whisper pipeline
+.venv/bin/python -m benchmark.runner --experiment two-stage-faster-whisper-pruned
+
+# Run NVIDIA FastConformer benchmark (requires: pip install -e .[nemo])
+.venv/bin/python -m benchmark.runner --experiment nvidia-fastconformer
+
 # Filter by audio category
 .venv/bin/python -m benchmark.runner --category short
 ```
 
-Results are saved to `benchmark/results/<timestamp>.json`. The runner also maintains `benchmark/results/latest.json` with the best result per experiment.
+Results are saved to `benchmark/results/<timestamp>.json`. The runner also maintains `benchmark/results/latest.json` with best results per scoped run (`mode`, `category`, and sample count).
+
+To build local Rabah pruned checkpoints (naive, no fine-tuning):
+
+```bash
+.venv/bin/python scripts/build_rabah_pruned_models.py --layers 12 8 6 --save-source
+```
+
+To fine-tune pruned models on Modal A100 GPU:
+
+```bash
+modal run --detach scripts/train_pruned_ctc_modal.py --layers 8 --strategy first_n
+modal run scripts/train_pruned_ctc_modal.py --layers 8 --strategy first_n --download-only
+```
 
 ## Adding a new experiment
 
@@ -243,7 +309,7 @@ Some experiments have additional dependencies (faiss-cpu, moonshine, mlx-whisper
 
 3. **ASR quality is the bottleneck for transcribe-then-match approaches.** All ASR-based approaches fail on the same samples. Two-stage sidesteps this by using ASR only for candidate retrieval, not the final decision.
 
-4. **There are no small Arabic wav2vec2 models.** wav2vec2-base (95M, English-only) can't learn Arabic CTC from scratch. The smallest multilingual models (MMS-300M, XLS-R-300M) are ~300M params -- barely smaller than the large model. This is the fundamental blocker for the CTC-based size reduction path.
+4. **Layer pruning + fine-tuning works for CTC size reduction.** While there are no small Arabic wav2vec2 models pretrained from scratch, pruning a large Quran-specific model (24→8 layers) and fine-tuning the CTC head recovers most accuracy (72% vs 81% full model). The `first_n` strategy (keep contiguous early layers) outperforms `evenly_spaced` by 16 percentage points, suggesting early transformer layers carry the most transferable features.
 
 5. **Contrastive audio-text matching needs a multilingual encoder.** Both embedding search (HuBERT, 0% cross-speaker) and contrastive-v2 (wav2vec2-base, 9% val accuracy) failed because English-pretrained audio encoders don't produce useful features for Arabic speech. Multi-reciter training and deeper projection heads aren't enough to overcome bad audio representations.
 

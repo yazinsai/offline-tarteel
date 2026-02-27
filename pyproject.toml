@@ -19,6 +19,8 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest"]
 fingerprint = ["pyacoustid", "chromaprint"]
+faster_whisper = ["faster-whisper>=1.1.0"]
+nemo = ["nemo_toolkit[asr]>=2.2.0"]
 
 [project.scripts]
 recognize = "offline_tarteel.cli:main"

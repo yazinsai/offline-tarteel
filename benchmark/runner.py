@@ -34,7 +34,10 @@ EXPERIMENT_REGISTRY = {
     "ctc-alignment": EXPERIMENTS_DIR / "ctc-alignment" / "run.py",
     "tarteel-whisper-base": EXPERIMENTS_DIR / "tarteel-whisper-base" / "run.py",
     "two-stage": EXPERIMENTS_DIR / "two-stage" / "run.py",
+    "two-stage-faster-whisper-pruned": EXPERIMENTS_DIR / "two-stage-faster-whisper-pruned" / "run.py",
     "distilled-ctc": EXPERIMENTS_DIR / "distilled-ctc" / "run.py",
+    "rabah-pruned-ctc": EXPERIMENTS_DIR / "rabah-pruned-ctc" / "run.py",
+    "nvidia-fastconformer": EXPERIMENTS_DIR / "nvidia-fastconformer" / "run.py",
     "contrastive-v2": EXPERIMENTS_DIR / "contrastive-v2" / "run.py",
 }
 
@@ -103,11 +106,29 @@ def discover_experiments(filter_name: str | None = None) -> list[dict]:
     experiments = []
 
     for name, run_path in EXPERIMENT_REGISTRY.items():
-        if filter_name and filter_name != name:
+        if filter_name and filter_name != name and not filter_name.startswith(f"{name}/"):
             continue
         if not run_path.exists():
             print(f"Warning: {name} run.py not found at {run_path}")
             continue
+        try:
+            mod = _load_module(name.replace("/", "_").replace("-", "_"), run_path)
+            if hasattr(mod, "list_models"):
+                for model_name in mod.list_models():
+                    entry_name = f"{name}/{model_name}"
+                    if filter_name and filter_name != entry_name and filter_name != name:
+                        continue
+                    experiments.append({
+                        "name": entry_name,
+                        "run_path": run_path,
+                        "model_name": model_name,
+                    })
+                continue
+        except Exception as e:
+            # Fall back to treating this as a single experiment; the runtime
+            # will surface import/dependency errors per sample as needed.
+            print(f"Warning: could not expand models for {name}: {e}")
+
         experiments.append({"name": name, "run_path": run_path, "model_name": None})
 
     # Expand new-models
@@ -283,7 +304,13 @@ def print_table(results: list[dict]):
     print()
 
 
-def save_results(results: list[dict]):
+def save_results(
+    results: list[dict],
+    *,
+    mode: str = "full",
+    category: str | None = None,
+    chunk_seconds: float = 3.0,
+):
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
     path = RESULTS_DIR / f"{timestamp}.json"
@@ -294,11 +321,23 @@ def save_results(results: list[dict]):
     latest_path = RESULTS_DIR / "latest.json"
     if latest_path.exists():
         with open(latest_path) as f:
-            latest = {r["name"]: r for r in json.load(f)}
+            loaded_latest = json.load(f)
     else:
-        latest = {}
+        loaded_latest = []
+
+    latest = {}
+    for entry in loaded_latest:
+        key = (
+            entry.get("name"),
+            entry.get("mode", "full"),
+            entry.get("category"),
+            entry.get("total"),
+            entry.get("chunk_seconds"),
+        )
+        latest[key] = entry
 
     for r in results:
+        effective_chunk = chunk_seconds if mode == "streaming" else None
         summary = {
             "name": r["name"],
             "recall": r["recall"],
@@ -308,16 +347,42 @@ def save_results(results: list[dict]):
             "avg_latency": r["avg_latency"],
             "model_size": r["model_size"],
             "timestamp": timestamp,
+            "mode": mode,
+            "category": category,
+            "chunk_seconds": effective_chunk,
+            "source_file": path.name,
         }
-        prev = latest.get(r["name"])
+
+        key = (
+            summary["name"],
+            summary["mode"],
+            summary["category"],
+            summary["total"],
+            summary["chunk_seconds"],
+        )
+        prev = latest.get(key)
         if prev is None or r["sequence_accuracy"] > prev.get("sequence_accuracy", 0) or (
             r["sequence_accuracy"] == prev.get("sequence_accuracy", 0)
             and r["avg_latency"] < prev.get("avg_latency", float("inf"))
         ):
-            latest[r["name"]] = summary
+            latest[key] = summary
 
     with open(latest_path, "w") as f:
-        json.dump(sorted(latest.values(), key=lambda x: x["name"]), f, indent=2, default=str)
+        json.dump(
+            sorted(
+                latest.values(),
+                key=lambda x: (
+                    x.get("name", ""),
+                    x.get("mode", "full"),
+                    x.get("category") or "",
+                    x.get("total", 0),
+                    x.get("chunk_seconds") or 0,
+                ),
+            ),
+            f,
+            indent=2,
+            default=str,
+        )
     print(f"Updated {latest_path}")
 
 
@@ -357,7 +422,12 @@ def main():
         print(f"    Recall: {result['recall']:.0%}  Precision: {result['precision']:.0%}  SeqAcc: {result['sequence_accuracy']:.0%}")
 
     print_table(results)
-    save_results(results)
+    save_results(
+        results,
+        mode=args.mode,
+        category=args.category,
+        chunk_seconds=args.chunk,
+    )
 
 
 if __name__ == "__main__":
