@@ -38,6 +38,8 @@ EXPERIMENT_REGISTRY = {
     "distilled-ctc": EXPERIMENTS_DIR / "distilled-ctc" / "run.py",
     "rabah-pruned-ctc": EXPERIMENTS_DIR / "rabah-pruned-ctc" / "run.py",
     "nvidia-fastconformer": EXPERIMENTS_DIR / "nvidia-fastconformer" / "run.py",
+    "fastconformer-ctc-rescore": EXPERIMENTS_DIR / "fastconformer-ctc-rescore" / "run.py",
+    "fastconformer-nbest-bruteforce": EXPERIMENTS_DIR / "fastconformer-nbest-bruteforce" / "run.py",
     "contrastive-v2": EXPERIMENTS_DIR / "contrastive-v2" / "run.py",
 }
 
