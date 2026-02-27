@@ -4,7 +4,7 @@ This experiment uses NeMo's hybrid RNNT+CTC Arabic model:
   nvidia/stt_ar_fastconformer_hybrid_large_pcd_v1.0
 
 Pipeline:
-  audio -> FastConformer transcript -> QuranDB text search -> best verse
+  audio -> FastConformer transcript -> QuranDB span-aware match
 
 Note: Requires `nemo_toolkit[asr]`.
 """
@@ -26,7 +26,12 @@ from shared.normalizer import normalize_arabic
 from shared.quran_db import QuranDB
 
 NVIDIA_MODEL_ID = "nvidia/stt_ar_fastconformer_hybrid_large_pcd_v1.0"
-LOCAL_MODEL_DIR = PROJECT_ROOT / "data" / "nvidia-fastconformer-ar"
+LOCAL_MODEL_DIR = Path(
+    os.getenv(
+        "NVIDIA_FASTCONFORMER_LOCAL_MODEL_DIR",
+        str(PROJECT_ROOT / "data" / "nvidia-fastconformer-ar"),
+    )
+)
 MODEL_SIZE_BYTES = 115 * 1024 * 1024
 DECODER_TYPE = os.getenv("NVIDIA_FASTCONFORMER_DECODER", "ctc")
 SPAN_THRESHOLD = float(os.getenv("NVIDIA_FASTCONFORMER_SPAN_THRESHOLD", "0.25"))
@@ -115,14 +120,18 @@ def _ensure_loaded():
         return
 
     _install_kaldialign_fallback()
+    os.environ.setdefault("NEMO_LOG_LEVEL", "ERROR")
 
     try:
         from nemo.collections.asr.models import EncDecHybridRNNTCTCBPEModel
+        from nemo.utils import logging as nemo_logging
     except Exception as exc:
         raise ImportError(
             "NeMo ASR dependencies are required for nvidia-fastconformer. "
             "Install with: pip install 'nemo_toolkit[asr]'"
         ) from exc
+
+    nemo_logging.set_verbosity(nemo_logging.ERROR)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     source = str(LOCAL_MODEL_DIR) if LOCAL_MODEL_DIR.exists() else NVIDIA_MODEL_ID

@@ -10,6 +10,8 @@ Stage 2:
 """
 
 import math
+import io
+import os
 import sys
 import importlib.util
 from pathlib import Path
@@ -37,6 +39,7 @@ STAGE1_SIZE_BYTES = 147 * 1024 * 1024
 
 # Stage 2 (CTC rescoring) fallback chain — fine-tuned pruned models preferred
 STAGE2_CANDIDATES = [
+    PROJECT_ROOT / "data" / "rabah-ctc-pruned-8l-first_n-finetuned",
     PROJECT_ROOT / "data" / "rabah-ctc-pruned-8l-evenly_spaced-finetuned",
     PROJECT_ROOT / "data" / "rabah-ctc-pruned-12l-evenly_spaced-finetuned",
     PROJECT_ROOT / "data" / "rabah-ctc-pruned-8",
@@ -45,6 +48,7 @@ STAGE2_CANDIDATES = [
     PROJECT_ROOT / "data" / "ctc-model",
 ]
 STAGE2_HF_FALLBACK = "jonatasgrosman/wav2vec2-large-xlsr-53-arabic"
+STAGE2_DYNAMIC_INT8 = os.getenv("TWO_STAGE_STAGE2_DYNAMIC_INT8", "1") == "1"
 
 TOP_N = 50
 TOP_SURAHS_SPAN = 3
@@ -61,6 +65,20 @@ _stage2_size_bytes = 0
 
 def _dir_size_bytes(path: Path) -> int:
     return sum(f.stat().st_size for f in path.rglob("*") if f.is_file())
+
+
+def _estimate_state_dict_size(model: torch.nn.Module) -> int:
+    buf = io.BytesIO()
+    torch.save(model.state_dict(), buf)
+    return buf.getbuffer().nbytes
+
+
+def _can_use_dynamic_int8() -> bool:
+    supported = set(torch.backends.quantized.supported_engines)
+    if "qnnpack" in supported:
+        torch.backends.quantized.engine = "qnnpack"
+    engine = torch.backends.quantized.engine
+    return engine in {"qnnpack", "fbgemm", "x86"} and engine in supported
 
 
 def _resolve_stage2_model() -> tuple[str, int]:
@@ -98,9 +116,19 @@ def _ensure_loaded():
     print(f"Loading Stage 2 CTC from {stage2_source}...")
     _ctc_processor = Wav2Vec2Processor.from_pretrained(stage2_source)
     _ctc_model = Wav2Vec2ForCTC.from_pretrained(stage2_source)
-    _ctc_model.eval()
 
-    _ctc_device = "mps" if torch.backends.mps.is_available() else "cpu"
+    if STAGE2_DYNAMIC_INT8 and _can_use_dynamic_int8():
+        _ctc_model = torch.ao.quantization.quantize_dynamic(
+            _ctc_model, {torch.nn.Linear}, dtype=torch.qint8
+        )
+        _ctc_device = "cpu"
+        _stage2_size_bytes = _estimate_state_dict_size(_ctc_model)
+    else:
+        if STAGE2_DYNAMIC_INT8:
+            print("Warning: dynamic int8 unavailable; using fp32 Stage 2 CTC model.")
+        _ctc_device = "mps" if torch.backends.mps.is_available() else "cpu"
+
+    _ctc_model.eval()
     _ctc_model.to(_ctc_device)
 
     _db = QuranDB()

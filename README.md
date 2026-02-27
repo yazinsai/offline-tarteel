@@ -18,18 +18,18 @@ Ship a model that runs on-device (phone or laptop) with **95%+ recall**, **sub-s
 
 Benchmarked on 54 samples (user recordings, professional reference audio, crowdsourced recordings):
 
-As of **February 26, 2026**, the table below reflects best full-corpus (54-sample) runs.
+As of **February 27, 2026**, the table below reflects best full-corpus (54-sample) runs.
 
 | Experiment | Approach | SeqAcc | Recall | Precision | Latency | Size |
 |---|---|---|---|---|---|---|
 | **nvidia-fastconformer** | NeMo FastConformer transcript + span-aware QuranDB matching | **85%** | **87%** | **89%** | **0.33s** | **115 MB** |
-| fastconformer-ctc-rescore | FastConformer + confidence-gated CTC re-scoring fallback | 85% | 87% | 89% | 0.69s | 260 MB |
+| fastconformer-ctc-rescore | FastConformer + confidence-gated int8 CTC re-scoring fallback | 85% | 87% | 89% | 0.66s | 273 MB |
 | fastconformer-nbest-bruteforce | N-best beam search + CTC brute-force fallback | 83% | 85% | 87% | 0.85s | 500 MB |
 | **ctc-alignment** | wav2vec2 CTC forced alignment (large baseline) | 81% | 83% | 83% | 3.24s | 1.2 GB |
 | rabah-pruned-ctc/8-layer-ft-fn-int8 | Rabah Quran CTC, 8L first_n pruned + fine-tuned + int8 | **72%** | 74% | 73% | 7.02s | **145 MB** |
 | rabah-pruned-ctc/12-layer-ft-es-int8 | Rabah Quran CTC, 12L evenly_spaced pruned + fine-tuned + int8 | **72%** | 73% | 74% | 3.65s | 193 MB |
 | two-stage | Moonshine ASR + large CTC re-score | 72% | 73% | 74% | 9.48s | 1.3 GB |
-| two-stage-faster-whisper-pruned | faster-whisper Quran + fine-tuned pruned CTC re-score | 70% | 73% | 73% | 10.06s | 582 MB |
+| two-stage-faster-whisper-pruned | faster-whisper Quran + fine-tuned pruned int8 CTC re-score | 70% | 72% | 71% | 3.96s | 306 MB |
 | tarteel-whisper-base | tarteel-ai/whisper-base-ar-quran + QuranDB | 67% | 72% | 75% | ~3s | 290 MB |
 | whisper-lora | Whisper-small + LoRA fine-tune + QuranDB | 58% | 64% | 65% | ~1.3s | 485 MB |
 | rabah-pruned-ctc/8-layer-ft-es-int8 | 8L evenly_spaced (wrong strategy) | 56% | 57% | 57% | 6.97s | 145 MB |
@@ -40,8 +40,13 @@ As of **February 26, 2026**, the table below reflects best full-corpus (54-sampl
 ## Experiment status
 
 - **NVIDIA FastConformer** is the top model: 85% SeqAcc, 115 MB, 0.33s latency.
+- **FastConformer fine-tune sweep regressed across all tested variants (v1/v2a/v2b).**  
+  v1 (Rabah+RetaSy, 2K steps): 81% SeqAcc / 84% recall (`benchmark/results/2026-02-27_092540.json`)  
+  v2a (Rabah+RetaSy, LR=2e-5, 1K steps): 80% SeqAcc / 81% recall (`benchmark/results/2026-02-27_104327.json`)  
+  v2b (Quran-only, LR=2e-5, 1K steps): 81% SeqAcc / 83% recall (`benchmark/results/2026-02-27_115055.json`)  
+  All produced larger local checkpoints (~459 MB) and none beat pretrained baseline (85%/87%).
 - **Rabah pruned+fine-tuned path now works.** Fine-tuning the CTC head on pruned representations recovered accuracy from 12% to 72% (8-layer first_n). The 8L int8 model is 145 MB -- well under the 200 MB target. The key insight: `first_n` pruning (keep layers 0-7) vastly outperforms `evenly_spaced` (72% vs 56%).
-- **Two-stage faster-whisper path** reaches 70% SeqAcc using the fine-tuned 8L CTC as Stage 2, but is still too large/slow (582 MB, 10s).
+- **Two-stage faster-whisper path** now runs with int8 Stage 2 at 306 MB and 3.96s (down from 582 MB / 10s), but still trails on accuracy (70% SeqAcc).
 - **N-best + brute-force didn't help.** `fastconformer-nbest-bruteforce` (83% SeqAcc) is worse than plain FastConformer. CTC beam search without a language model produces near-identical hypotheses, and brute-forcing entire surahs just picks wrong candidates. CTC re-scoring can't recover failures caused by bad candidate retrieval.
 
 ### Two-Stage Retrieval (historical 72% setup; current pruned variant at 70%)
@@ -156,6 +161,11 @@ Arabic FastConformer hybrid model via NeMo:
 - **Pipeline:** audio -> FastConformer transcript -> QuranDB span-aware match
 - **Dependency:** `nemo_toolkit[asr]` (optional extra `.[nemo]`)
 - **Local override:** `NVIDIA_FASTCONFORMER_LOCAL_MODEL_DIR=/abs/path/to/fine_tuned_model`
+- **Fine-tune sweep (2026-02-27):** CTC-only adaptation did not improve baseline.
+  - `v1` (Rabah+RetaSy, 2K steps): 81% SeqAcc / 84% recall (`benchmark/results/2026-02-27_092540.json`)
+  - `v2a` (Rabah+RetaSy, LR=2e-5, 1K steps): 80% SeqAcc / 81% recall (`benchmark/results/2026-02-27_104327.json`)
+  - `v2b` (Quran-only, LR=2e-5, 1K steps): 81% SeqAcc / 83% recall (`benchmark/results/2026-02-27_115055.json`)
+  - Best fine-tuned variant was `v2b`, but still below pretrained baseline (85% SeqAcc / 87% recall).
 
 ### fastconformer-ctc-rescore (new -- no accuracy gain over FastConformer alone)
 
@@ -164,9 +174,9 @@ Two-stage pipeline combining FastConformer ASR (best transcription) with CTC for
 - **Stage 1:** NVIDIA FastConformer (115 MB) -> transcript -> QuranDB span-aware match
 - **Stage 2 (fallback):** CTC re-score top-50 candidates using fine-tuned 8L Rabah CTC (145 MB)
 - **Gate:** If Stage 1 score >= threshold (default 0.7), return immediately without running Stage 2
-- **Result:** 85% SeqAcc / 87% recall / 89% precision, 0.69s latency (threshold=0.7), 260 MB total
+- **Result:** 85% SeqAcc / 87% recall / 89% precision, 0.66s latency (threshold=0.7), 273 MB total
 - **Finding:** CTC re-scoring does **not** recover any of the 8 samples FastConformer fails on, even with threshold=0.95 (forcing CTC on nearly everything). Both models fail on the same hard cases: short isolated letters (Ya-Sin, Al-Ikhlas) and multi-verse passages. The "complementary errors" hypothesis didn't hold -- the failures are in the candidate retrieval (bad transcript from FastConformer), not in the scoring.
-- **Tuning:** `FASTCONFORMER_CTC_CONFIDENCE=0.7` env var. Threshold sweep: 0.7 → 85% / 0.69s, 0.95 → 85% / 2.43s. Higher threshold = more CTC runs = more latency, same accuracy.
+- **Tuning:** `FASTCONFORMER_CTC_CONFIDENCE=0.7` and `FASTCONFORMER_CTC_STAGE2_DYNAMIC_INT8=1` (default). Threshold sweep: 0.7 → 85% / 0.66s, 0.95 → 85% / 2.43s. Higher threshold = more CTC runs = more latency, same accuracy.
 
 ### fastconformer-nbest-bruteforce (worse than baseline -- 83% SeqAcc, 500 MB)
 
@@ -183,9 +193,9 @@ N-best beam search on FastConformer CTC logits + CTC brute-force scoring of all 
 Two-stage retrieval variant using faster-whisper for ASR and fine-tuned pruned CTC for re-scoring:
 
 - **Stage 1:** `OdyAsh/faster-whisper-base-ar-quran` (147 MB, CTranslate2 int8)
-- **Stage 2:** CTC re-score top-50 candidates using fine-tuned 8L Rabah CTC (435 MB fp32)
-- **Result:** 70% SeqAcc / 73% recall / 73% precision, 10s latency, 582 MB total
-- **Bottleneck:** Stage 2 CTC model is still large; would benefit from int8 quantization or further pruning
+- **Stage 2:** CTC re-score top-50 candidates using fine-tuned 8L Rabah CTC with dynamic int8 (`TWO_STAGE_STAGE2_DYNAMIC_INT8=1`, default)
+- **Result:** 70% SeqAcc / 72% recall / 71% precision, 3.96s latency, 306 MB total
+- **Tradeoff:** Major speed/size gain vs prior fp32 run (10.06s, 582 MB) with small precision/recall drop
 
 ### contrastive-v2 (failed -- val accuracy stuck at 9%)
 
