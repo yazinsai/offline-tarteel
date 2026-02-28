@@ -5,13 +5,6 @@ import "./style.css";
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
-interface SurroundingVerse {
-  surah: number;
-  ayah: number;
-  text: string;
-  is_current: boolean;
-}
-
 interface VerseMatchMessage {
   type: "verse_match";
   surah: number;
@@ -19,7 +12,7 @@ interface VerseMatchMessage {
   verse_text: string;
   surah_name: string;
   confidence: number;
-  surrounding_verses: SurroundingVerse[];
+  surrounding_verses: { surah: number; ayah: number; text: string; is_current: boolean }[];
 }
 
 interface RawTranscriptMessage {
@@ -30,13 +23,24 @@ interface RawTranscriptMessage {
 
 type ServerMessage = VerseMatchMessage | RawTranscriptMessage;
 
+interface SurahVerse {
+  ayah: number;
+  text_uthmani: string;
+}
+
+interface SurahData {
+  surah: number;
+  surah_name: string;
+  surah_name_en: string;
+  verses: SurahVerse[];
+}
+
 interface VerseGroup {
   surah: number;
   surahName: string;
-  startAyah: number;
-  endAyah: number;
+  surahNameEn: string;
   currentAyah: number;
-  verses: SurroundingVerse[];
+  verses: SurahVerse[];
   element: HTMLElement;
 }
 
@@ -49,6 +53,8 @@ const state = {
   audioCtx: null as AudioContext | null,
   stream: null as MediaStream | null,
   isActive: false,
+  hasFirstMatch: false,
+  surahCache: new Map<number, SurahData>(),
 };
 
 // ---------------------------------------------------------------------------
@@ -58,6 +64,7 @@ const $verses = document.getElementById("verses")!;
 const $rawTranscript = document.getElementById("raw-transcript")!;
 const $indicator = document.getElementById("listening-indicator")!;
 const $permissionPrompt = document.getElementById("permission-prompt")!;
+const $listeningStatus = document.getElementById("listening-status")!;
 
 // ---------------------------------------------------------------------------
 // Arabic numeral converter
@@ -71,110 +78,142 @@ function toArabicNum(n: number): string {
 }
 
 // ---------------------------------------------------------------------------
+// Surah data fetching
+// ---------------------------------------------------------------------------
+async function fetchSurah(surahNum: number): Promise<SurahData> {
+  const cached = state.surahCache.get(surahNum);
+  if (cached) return cached;
+
+  const res = await fetch(`/api/surah/${surahNum}`);
+  const data: SurahData = await res.json();
+  state.surahCache.set(surahNum, data);
+  return data;
+}
+
+// ---------------------------------------------------------------------------
 // Verse rendering
 // ---------------------------------------------------------------------------
 function createVerseGroupElement(group: VerseGroup): HTMLElement {
   const el = document.createElement("div");
   el.className = "verse-group";
   el.setAttribute("data-surah", String(group.surah));
-  renderVerseGroup(el, group);
-  return el;
-}
 
-function renderVerseGroup(el: HTMLElement, group: VerseGroup): void {
-  el.innerHTML = "";
+  // Surah header
+  const header = document.createElement("div");
+  header.className = "surah-header";
+  header.dir = "rtl";
+  header.lang = "ar";
+  header.textContent = group.surahName;
+  el.appendChild(header);
+
+  // Flowing verse body — all verses as inline spans
+  const body = document.createElement("div");
+  body.className = "verse-body";
+  body.dir = "rtl";
+  body.lang = "ar";
 
   for (const v of group.verses) {
-    const verseEl = document.createElement("div");
-    verseEl.className = `verse ${v.is_current ? "verse--active" : "verse--context"}`;
-    verseEl.dir = "rtl";
-    verseEl.lang = "ar";
+    const verseEl = document.createElement("span");
+    verseEl.className = "verse verse--upcoming";
+    verseEl.setAttribute("data-ayah", String(v.ayah));
 
     const textEl = document.createElement("span");
     textEl.className = "verse-text";
-    textEl.textContent = v.text;
+    textEl.textContent = v.text_uthmani;
     verseEl.appendChild(textEl);
 
-    // Ayah end marker
     const markerEl = document.createElement("span");
     markerEl.className = "verse-marker";
     markerEl.textContent = ` \u06DD${toArabicNum(v.ayah)} `;
     verseEl.appendChild(markerEl);
 
-    // Metadata (hidden by default, shown on hover/tap)
-    const metaEl = document.createElement("div");
-    metaEl.className = "verse-meta";
-    metaEl.dir = "rtl";
-    metaEl.textContent = `${group.surahName} \u2014 \u0622\u064A\u0629 ${toArabicNum(v.ayah)}`;
-    verseEl.appendChild(metaEl);
+    body.appendChild(verseEl);
+  }
 
-    // Tap to toggle metadata on mobile
-    verseEl.addEventListener("click", () => {
-      verseEl.classList.toggle("verse--meta-visible");
-    });
+  el.appendChild(body);
+  return el;
+}
 
-    el.appendChild(verseEl);
+function updateVerseHighlight(group: VerseGroup, newAyah: number): void {
+  const el = group.element;
+  const oldAyah = group.currentAyah;
+
+  // Mark all ayahs between old and new (inclusive of old) as recited
+  const verses = el.querySelectorAll<HTMLElement>(".verse");
+  for (const verseEl of verses) {
+    const ayah = parseInt(verseEl.getAttribute("data-ayah") || "0");
+    if (ayah === newAyah) {
+      verseEl.className = "verse verse--active";
+    } else if (ayah <= newAyah && (ayah >= oldAyah || ayah < oldAyah)) {
+      // Mark as recited if it was active or skipped
+      if (
+        verseEl.classList.contains("verse--active") ||
+        (ayah > oldAyah && ayah < newAyah) ||
+        ayah <= oldAyah
+      ) {
+        verseEl.className = "verse verse--recited";
+      }
+    }
+  }
+
+  group.currentAyah = newAyah;
+  scrollToActiveVerse();
+}
+
+function scrollToActiveVerse(): void {
+  const active = document.querySelector(".verse--active");
+  if (active) {
+    active.scrollIntoView({ behavior: "smooth", block: "center" });
   }
 }
 
-function handleVerseMatch(msg: VerseMatchMessage): void {
-  // Clear raw transcript when we get a confident match
+// ---------------------------------------------------------------------------
+// Message handlers
+// ---------------------------------------------------------------------------
+async function handleVerseMatch(msg: VerseMatchMessage): Promise<void> {
   $rawTranscript.textContent = "";
   $rawTranscript.classList.remove("visible");
 
-  // Dim the indicator when verses are showing
-  $indicator.classList.add("has-verses");
+  // First match: hide listening status, show indicator with has-verses
+  if (!state.hasFirstMatch) {
+    state.hasFirstMatch = true;
+    $listeningStatus.hidden = true;
+    $indicator.classList.add("has-verses");
+  }
 
   const lastGroup = state.groups[state.groups.length - 1];
 
-  // Check if this verse belongs to the current group (same surah, nearby)
-  if (
-    lastGroup &&
-    lastGroup.surah === msg.surah &&
-    Math.abs(msg.ayah - lastGroup.currentAyah) <= SURROUNDING_CONTEXT + 1
-  ) {
-    // Update existing group: expand context
-    lastGroup.currentAyah = msg.ayah;
-    lastGroup.verses = msg.surrounding_verses;
-    lastGroup.startAyah = Math.min(
-      lastGroup.startAyah,
-      msg.surrounding_verses[0]?.ayah ?? msg.ayah
-    );
-    lastGroup.endAyah = Math.max(
-      lastGroup.endAyah,
-      msg.surrounding_verses[msg.surrounding_verses.length - 1]?.ayah ?? msg.ayah
-    );
-    renderVerseGroup(lastGroup.element, lastGroup);
-  } else {
-    // Deactivate previous group's active verse
-    if (lastGroup) {
-      lastGroup.element.querySelectorAll(".verse--active").forEach((el) => {
-        el.classList.remove("verse--active");
-        el.classList.add("verse--context");
-      });
-    }
-
-    // Create new group
-    const group: VerseGroup = {
-      surah: msg.surah,
-      surahName: msg.surah_name,
-      startAyah: msg.surrounding_verses[0]?.ayah ?? msg.ayah,
-      endAyah:
-        msg.surrounding_verses[msg.surrounding_verses.length - 1]?.ayah ?? msg.ayah,
-      currentAyah: msg.ayah,
-      verses: msg.surrounding_verses,
-      element: document.createElement("div"),
-    };
-    group.element = createVerseGroupElement(group);
-    state.groups.push(group);
-    $verses.appendChild(group.element);
-
-    // Scroll to the new group smoothly
-    group.element.scrollIntoView({ behavior: "smooth", block: "center" });
+  // Same surah as current group — just move the highlight
+  if (lastGroup && lastGroup.surah === msg.surah) {
+    updateVerseHighlight(lastGroup, msg.ayah);
+    return;
   }
-}
 
-const SURROUNDING_CONTEXT = 2;
+  // New surah — fade out old group, fetch full surah, render
+  if (lastGroup) {
+    lastGroup.element.classList.add("verse-group--exiting");
+    // Remove after animation completes
+    const oldEl = lastGroup.element;
+    setTimeout(() => oldEl.remove(), 400);
+  }
+
+  const surahData = await fetchSurah(msg.surah);
+
+  const group: VerseGroup = {
+    surah: msg.surah,
+    surahName: surahData.surah_name,
+    surahNameEn: surahData.surah_name_en,
+    currentAyah: 0, // will be set by updateVerseHighlight
+    verses: surahData.verses,
+    element: document.createElement("div"),
+  };
+  group.element = createVerseGroupElement(group);
+  state.groups.push(group);
+  $verses.appendChild(group.element);
+
+  // Set the active verse highlight
+  updateVerseHighlight(group, msg.ayah);
+}
 
 function handleRawTranscript(msg: RawTranscriptMessage): void {
   $rawTranscript.textContent = msg.text;
@@ -205,7 +244,6 @@ function connectWebSocket(): WebSocket {
 
   ws.onclose = () => {
     state.ws = null;
-    // Reconnect after a short delay
     if (state.isActive) {
       setTimeout(() => {
         if (state.isActive) {
@@ -233,18 +271,18 @@ async function startAudio(): Promise<void> {
     state.stream = stream;
     $permissionPrompt.hidden = true;
 
-    // Connect WebSocket first
+    // Show listening status
+    $listeningStatus.hidden = false;
+
     const ws = connectWebSocket();
     state.ws = ws;
 
     await new Promise<void>((resolve, reject) => {
       ws.onopen = () => resolve();
       ws.onerror = () => reject(new Error("WebSocket failed"));
-      // Timeout after 5s
       setTimeout(() => reject(new Error("WebSocket timeout")), 5000);
     });
 
-    // Set up AudioContext + WorkletNode
     const audioCtx = new AudioContext();
     state.audioCtx = audioCtx;
 
@@ -258,7 +296,6 @@ async function startAudio(): Promise<void> {
       }
     };
 
-    // Audio level detection for indicator
     const analyser = audioCtx.createAnalyser();
     analyser.fftSize = 256;
     source.connect(analyser);

@@ -3,8 +3,32 @@ from pathlib import Path
 from Levenshtein import ratio
 from shared.normalizer import normalize_arabic
 
+
+def partial_ratio(short: str, long: str) -> float:
+    """Levenshtein ratio of *short* against its best-matching window in *long*.
+
+    Useful for detecting when a short transcription is a fragment of a longer
+    verse that was already emitted.
+    """
+    if not short or not long:
+        return 0.0
+    if len(short) > len(long):
+        short, long = long, short
+    window = len(short)
+    best = 0.0
+    for i in range(max(1, len(long) - window + 1)):
+        r = ratio(short, long[i:i + window])
+        if r > best:
+            best = r
+            if best == 1.0:
+                break
+    return best
+
 # Resolve to project root / data / quran.json
 DATA_PATH = Path(__file__).parent.parent / "data" / "quran.json"
+
+
+_BSM_CLEAN = normalize_arabic("بسم الله الرحمن الرحيم")
 
 
 class QuranDB:
@@ -16,6 +40,17 @@ class QuranDB:
         for v in self.verses:
             self._by_ref[(v["surah"], v["ayah"])] = v
             self._by_surah.setdefault(v["surah"], []).append(v)
+            # Pre-compute bismillah-stripped text for verse 1 of each surah
+            # (Al-Fatiha 1:1 IS the bismillah, At-Tawbah 9 has none)
+            if (
+                v["ayah"] == 1
+                and v["surah"] not in (1, 9)
+                and v["text_clean"].startswith(_BSM_CLEAN)
+            ):
+                stripped = v["text_clean"][len(_BSM_CLEAN):].strip()
+                v["text_clean_no_bsm"] = stripped if stripped else None
+            else:
+                v["text_clean_no_bsm"] = None
 
     @property
     def total_verses(self):
@@ -61,17 +96,41 @@ class QuranDB:
         bonuses: dict[tuple[int, int], float] = {}
         nv = self._by_ref.get((h_surah, h_ayah + 1))
         if nv:
-            bonuses[(h_surah, h_ayah + 1)] = 0.15
+            bonuses[(h_surah, h_ayah + 1)] = 0.22
             if self._by_ref.get((h_surah, h_ayah + 2)):
-                bonuses[(h_surah, h_ayah + 2)] = 0.08
+                bonuses[(h_surah, h_ayah + 2)] = 0.12
+            if self._by_ref.get((h_surah, h_ayah + 3)):
+                bonuses[(h_surah, h_ayah + 3)] = 0.06
         else:
             # Last ayah in surah — bonus carries to first ayah(s) of next surah
             next_verses = self._by_surah.get(h_surah + 1, [])
-            if next_verses:
-                bonuses[(next_verses[0]["surah"], next_verses[0]["ayah"])] = 0.15
-                if len(next_verses) > 1:
-                    bonuses[(next_verses[1]["surah"], next_verses[1]["ayah"])] = 0.08
+            for i, nv in enumerate(next_verses[:3]):
+                bonus = [0.22, 0.12, 0.06][i]
+                bonuses[(nv["surah"], nv["ayah"])] = bonus
         return bonuses
+
+    @staticmethod
+    def _suffix_prefix_score(text: str, verse_text: str) -> float:
+        """Best Levenshtein ratio from matching suffixes of *text* against
+        equal-length prefixes of *verse_text*.
+
+        After a window reset the transcription often starts with residual
+        words from the *previous* verse followed by the start of the *next*
+        verse. This method finds the best alignment by sliding the split
+        point through the transcription.
+        """
+        words_t = text.split()
+        words_v = verse_text.split()
+        if len(words_t) < 2 or len(words_v) < 2:
+            return 0.0
+        best = 0.0
+        max_trim = min(len(words_t) // 2, 4)
+        for trim in range(1, max_trim + 1):
+            suffix = " ".join(words_t[trim:])
+            n = len(words_t) - trim
+            prefix = " ".join(words_v[:min(n, len(words_v))])
+            best = max(best, ratio(suffix, prefix))
+        return best
 
     def match_verse(
         self,
@@ -103,7 +162,15 @@ class QuranDB:
         scored = []
         for v in self.verses:
             raw = ratio(text, v["text_clean"])
+            # Also try matching without the bismillah prefix for verse 1s
+            if v["text_clean_no_bsm"]:
+                raw = max(raw, ratio(text, v["text_clean_no_bsm"]))
             bonus = bonuses.get((v["surah"], v["ayah"]), 0.0)
+            # For continuation candidates, also try suffix-prefix matching
+            # to handle residual text from the previous verse in the window
+            if bonus > 0:
+                sp = self._suffix_prefix_score(text, v["text_clean"])
+                raw = max(raw, sp)
             scored.append((v, raw, bonus, min(raw + bonus, 1.0)))
         scored.sort(key=lambda x: x[3], reverse=True)
 
@@ -136,7 +203,13 @@ class QuranDB:
                     if i + span > len(verses):
                         break
                     chunk = verses[i:i + span]
-                    combined = " ".join(c["text_clean"] for c in chunk)
+                    # Use no-bismillah text for the first verse in a span
+                    first_text = (
+                        chunk[0]["text_clean_no_bsm"] or chunk[0]["text_clean"]
+                    )
+                    combined = " ".join(
+                        [first_text] + [c["text_clean"] for c in chunk[1:]]
+                    )
                     raw = ratio(text, combined)
                     bonus = bonuses.get((chunk[0]["surah"], chunk[0]["ayah"]), 0.0)
                     score = min(raw + bonus, 1.0)

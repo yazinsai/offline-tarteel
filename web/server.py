@@ -19,7 +19,7 @@ import numpy as np
 import soundfile as sf
 import torch
 import uvicorn
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
@@ -30,7 +30,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from shared.normalizer import normalize_arabic
-from shared.quran_db import QuranDB
+from shared.quran_db import QuranDB, partial_ratio
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -45,6 +45,7 @@ PORT = 8000
 
 # Matching thresholds
 VERSE_MATCH_THRESHOLD = 0.45
+FIRST_MATCH_THRESHOLD = 0.75  # higher bar before any verse is locked on
 RAW_TRANSCRIPT_THRESHOLD = 0.25
 SURROUNDING_CONTEXT = 2  # verses before/after current
 
@@ -296,6 +297,7 @@ async def websocket_endpoint(ws: WebSocket):
     full_audio = np.empty(0, dtype=np.float32)
     new_audio_count = 0
     last_emitted_ref: tuple[int, int] | None = None
+    last_emitted_text: str = ""
 
     try:
         while True:
@@ -323,7 +325,7 @@ async def websocket_endpoint(ws: WebSocket):
                 None, _transcribe, full_audio.copy()
             )
 
-            if not text or not text.strip():
+            if not text or len(text.strip()) < 5:
                 continue
 
             audio_len = len(full_audio) / SAMPLE_RATE
@@ -332,6 +334,16 @@ async def websocket_endpoint(ws: WebSocket):
                 audio_len,
                 text[:120],
             )
+
+            # Skip if transcription is mostly residual from the last emitted verse
+            if last_emitted_text:
+                residual = partial_ratio(text, last_emitted_text)
+                if residual > 0.70:
+                    log.info(
+                        "  (residual overlap %.2f with last emitted, skipping)",
+                        residual,
+                    )
+                    continue
 
             # Match against QuranDB (span-aware, with continuation bias)
             match = quran_db.match_verse(
@@ -377,7 +389,8 @@ async def websocket_endpoint(ws: WebSocket):
             else:
                 log.info("NO MATCH (below %.2f)  hint=%s", RAW_TRANSCRIPT_THRESHOLD, hint_str)
 
-            if match and match["score"] >= VERSE_MATCH_THRESHOLD:
+            effective_threshold = FIRST_MATCH_THRESHOLD if last_emitted_ref is None else VERSE_MATCH_THRESHOLD
+            if match and match["score"] >= effective_threshold:
                 ref = (match["surah"], match["ayah"])
 
                 # Dedup: skip if same verse was just sent
@@ -404,19 +417,27 @@ async def websocket_endpoint(ws: WebSocket):
                     }
                 )
 
+                # For multi-verse spans, advance hint to the last verse
+                ayah_end = match.get("ayah_end")
+                effective_ref = (match["surah"], ayah_end) if ayah_end else ref
                 log.info(
-                    ">>> EMITTED verse_match %s:%s (was %s)",
+                    ">>> EMITTED verse_match %s:%s%s (was %s)",
                     match["surah"],
                     match["ayah"],
+                    f"-{ayah_end}" if ayah_end else "",
                     hint_str,
                 )
-                last_emitted_ref = ref
+                last_emitted_ref = effective_ref
+                last_emitted_text = normalize_arabic(
+                    match.get("text_clean", "")
+                    or (verse["text_clean"] if verse else "")
+                )
 
                 # Reset window for next verse detection
                 full_audio = tail.copy()
             else:
                 score = round(match["score"], 2) if match else 0.0
-                log.info("  (below threshold %.2f — sending raw_transcript, score=%.2f)", VERSE_MATCH_THRESHOLD, score)
+                log.info("  (below threshold %.2f — sending raw_transcript, score=%.2f)", effective_threshold, score)
                 await ws.send_json(
                     {
                         "type": "raw_transcript",
@@ -429,6 +450,28 @@ async def websocket_endpoint(ws: WebSocket):
         log.info("Client disconnected: %s", ws.client)
     except Exception:
         log.exception("WebSocket error")
+
+
+# ---------------------------------------------------------------------------
+# REST API
+# ---------------------------------------------------------------------------
+@app.get("/api/surah/{surah_num}")
+async def get_surah(surah_num: int):
+    verses = quran_db.get_surah(surah_num)
+    if not verses:
+        raise HTTPException(status_code=404, detail="Surah not found")
+    return {
+        "surah": surah_num,
+        "surah_name": verses[0]["surah_name"],
+        "surah_name_en": verses[0]["surah_name_en"],
+        "verses": [
+            {
+                "ayah": v["ayah"],
+                "text_uthmani": v["text_uthmani"],
+            }
+            for v in verses
+        ],
+    }
 
 
 # ---------------------------------------------------------------------------
