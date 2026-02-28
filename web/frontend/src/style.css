@@ -54,16 +54,17 @@ body {
   animation: fade-in 0.6s ease-out;
 }
 
-#listening-status .listening-status-ar {
-  font-family: var(--font-arabic);
-  font-size: 1.8rem;
+#listening-status .listening-status-main {
+  font-family: var(--font-system);
+  font-size: 1.5rem;
   color: var(--text-light);
   margin-bottom: 0.5rem;
+  letter-spacing: 0.02em;
 }
 
 #listening-status .listening-status-sub {
-  font-family: var(--font-arabic);
-  font-size: 1.1rem;
+  font-family: var(--font-system);
+  font-size: 0.95rem;
   color: var(--text-muted);
 }
 
@@ -118,13 +119,15 @@ body {
 
 /* ── Surah header ── */
 .surah-header {
-  font-family: var(--font-arabic);
-  font-size: 1.2rem;
+  font-family: var(--font-system);
+  font-size: 1rem;
   color: var(--text-muted);
   text-align: center;
   padding: 0.5rem 0 1.5rem;
   border-bottom: 1px solid var(--accent-warm);
   margin-bottom: 1rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
 }
 
 /* ── Bismillah ── */
@@ -372,8 +375,8 @@ body {
     font-size: 1.15rem;
   }
 
-  #listening-status .listening-status-ar {
-    font-size: 1.5rem;
+  #listening-status .listening-status-main {
+    font-size: 1.3rem;
   }
 }
 

@@ -161,9 +161,7 @@ function createVerseGroupElement(group: VerseGroup): HTMLElement {
   // Surah header
   const header = document.createElement("div");
   header.className = "surah-header";
-  header.dir = "rtl";
-  header.lang = "ar";
-  header.textContent = group.surahName;
+  header.textContent = group.surahNameEn;
   el.appendChild(header);
 
   // Bismillah line (separate from verse text) for surahs that have it
