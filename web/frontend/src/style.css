@@ -127,6 +127,15 @@ body {
   margin-bottom: 1rem;
 }
 
+/* ── Bismillah ── */
+.bismillah {
+  font-family: var(--font-arabic);
+  font-size: 1.5rem;
+  color: var(--text-light);
+  text-align: center;
+  padding: 0.75rem 0 0.5rem;
+}
+
 /* ── Verse text container (flowing RTL paragraph) ── */
 .verse-body {
   font-family: var(--font-arabic);

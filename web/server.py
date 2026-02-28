@@ -56,6 +56,8 @@ TRACKING_TRIGGER_SECONDS = 0.5
 TRACKING_TRIGGER_SAMPLES = int(SAMPLE_RATE * TRACKING_TRIGGER_SECONDS)
 TRACKING_SILENCE_TIMEOUT = 4.0  # seconds of silence before exiting tracking
 TRACKING_SILENCE_SAMPLES = int(SAMPLE_RATE * TRACKING_SILENCE_TIMEOUT)
+TRACKING_MAX_WINDOW_SECONDS = 5.0  # shorter window to flush old-audio residue
+TRACKING_MAX_WINDOW_SAMPLES = int(SAMPLE_RATE * TRACKING_MAX_WINDOW_SECONDS)
 
 # Model config
 NVIDIA_MODEL_ID = "nvidia/stt_ar_fastconformer_hybrid_large_pcd_v1.0"
@@ -386,8 +388,16 @@ async def websocket_endpoint(ws: WebSocket):
 
     def _exit_tracking(reason: str) -> None:
         nonlocal tracking_verse, tracking_verse_words, tracking_last_word_idx
-        nonlocal silence_samples, stale_cycles
+        nonlocal silence_samples, stale_cycles, last_emitted_text
         log.info("TRACKING exit: %s", reason)
+        # When exiting due to stale tracking (not verse completion),
+        # update last_emitted_text to only the tracked portion so that
+        # discovery mode can detect the continuation of the same verse
+        # without being blocked by residual overlap.
+        if reason.startswith("stale") and tracking_verse_words and tracking_last_word_idx >= 0:
+            tracked_portion = " ".join(tracking_verse_words[:tracking_last_word_idx + 1])
+            last_emitted_text = tracked_portion
+            log.info("  (updated residual text to tracked portion: %d words)", tracking_last_word_idx + 1)
         tracking_verse = None
         tracking_verse_words = []
         tracking_last_word_idx = -1
@@ -401,9 +411,16 @@ async def websocket_endpoint(ws: WebSocket):
             full_audio = np.concatenate([full_audio, samples])
             new_audio_count += len(samples)
 
-            # Trim to max window (keep latest audio)
-            if len(full_audio) > MAX_WINDOW_SAMPLES:
-                full_audio = full_audio[-MAX_WINDOW_SAMPLES:]
+            # Trim to max window (shorter in tracking mode to flush
+            # old-audio residue that causes false matches in verses
+            # with repeated phrases like 3:26 "من تشاء" × 4)
+            max_samples = (
+                TRACKING_MAX_WINDOW_SAMPLES
+                if tracking_verse is not None
+                else MAX_WINDOW_SAMPLES
+            )
+            if len(full_audio) > max_samples:
+                full_audio = full_audio[-max_samples:]
 
             # ---------------------------------------------------------------
             # TRACKING MODE: fast cycle for word-level progress

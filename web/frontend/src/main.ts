@@ -137,6 +137,22 @@ function splitUthmaniWords(text: string): WordToken[] {
   return result;
 }
 
+// Bismillah: 4 words "بسم الله الرحمن الرحيم"
+// We detect it by stripping diacritics and comparing base letters,
+// since the Uthmani text may have different diacritic orderings.
+const BISMILLAH_WORD_COUNT = 4;
+const BISMILLAH_BASE = "بسم الله الرحمن الرحيم";
+
+/** Strip Arabic diacritics (tashkeel) for comparison */
+function stripDiacritics(s: string): string {
+  return s.replace(/[\u0610-\u061A\u064B-\u065F\u0670\u06D6-\u06DC\u06DF-\u06E4\u06E7\u06E8\u06EA-\u06ED]/g, "");
+}
+
+function startsWithBismillah(text: string): boolean {
+  const stripped = stripDiacritics(text);
+  return stripped.startsWith(BISMILLAH_BASE) || stripped.startsWith(stripDiacritics(BISMILLAH_BASE));
+}
+
 function createVerseGroupElement(group: VerseGroup): HTMLElement {
   const el = document.createElement("div");
   el.className = "verse-group";
@@ -150,6 +166,23 @@ function createVerseGroupElement(group: VerseGroup): HTMLElement {
   header.textContent = group.surahName;
   el.appendChild(header);
 
+  // Bismillah line (separate from verse text) for surahs that have it
+  const hasBismillah =
+    group.surah !== 1 &&
+    group.surah !== 9 &&
+    startsWithBismillah(group.verses[0]?.text_uthmani ?? "");
+  if (hasBismillah) {
+    // Extract the actual bismillah text (first 4 words) from the verse
+    const words = group.verses[0].text_uthmani.split(/\s+/);
+    const bsmText = words.slice(0, BISMILLAH_WORD_COUNT).join(" ");
+    const bsmEl = document.createElement("div");
+    bsmEl.className = "bismillah";
+    bsmEl.dir = "rtl";
+    bsmEl.lang = "ar";
+    bsmEl.textContent = bsmText;
+    el.appendChild(bsmEl);
+  }
+
   // Flowing verse body — all verses as inline spans
   const body = document.createElement("div");
   body.className = "verse-body";
@@ -162,17 +195,23 @@ function createVerseGroupElement(group: VerseGroup): HTMLElement {
     verseEl.setAttribute("data-ayah", String(v.ayah));
 
     // Split verse text into individual word spans (merging waqf marks)
-    const words = splitUthmaniWords(v.text_uthmani);
+    const allWords = splitUthmaniWords(v.text_uthmani);
+
+    // For ayah 1, skip the bismillah words (already shown in header)
+    // but keep the data-word-idx aligned with the server's text_clean
+    const skipBsm = hasBismillah && v.ayah === 1;
+    const startIdx = skipBsm ? BISMILLAH_WORD_COUNT : 0;
+
     const textEl = document.createElement("span");
     textEl.className = "verse-text";
-    for (let i = 0; i < words.length; i++) {
+    for (let i = startIdx; i < allWords.length; i++) {
       const wordEl = document.createElement("span");
       wordEl.className = "word";
       wordEl.setAttribute("data-word-idx", String(i));
-      wordEl.textContent = words[i].text;
+      wordEl.textContent = allWords[i].text;
       textEl.appendChild(wordEl);
       // Add space between words (except after the last)
-      if (i < words.length - 1) {
+      if (i < allWords.length - 1) {
         textEl.appendChild(document.createTextNode(" "));
       }
     }
@@ -271,6 +310,10 @@ async function handleVerseMatch(msg: VerseMatchMessage): Promise<void> {
   updateVerseHighlight(group, msg.ayah);
 }
 
+// Cumulative set of matched word indices for the current tracking verse
+let _matchedWordIndices = new Set<number>();
+let _trackingKey = "";  // "surah:ayah" to detect verse changes
+
 function handleWordProgress(msg: WordProgressMessage): void {
   const lastGroup = state.groups[state.groups.length - 1];
   if (!lastGroup || lastGroup.surah !== msg.surah) return;
@@ -285,15 +328,33 @@ function handleWordProgress(msg: WordProgressMessage): void {
     updateVerseHighlight(lastGroup, msg.ayah);
   }
 
-  // Highlight contiguously: all words from 0 up to the furthest
-  // matched index, so there are no gaps in the highlight
-  const maxIdx = msg.matched_indices.length > 0
-    ? Math.max(...msg.matched_indices)
-    : -1;
+  // Reset cumulative indices when tracking a new verse
+  const key = `${msg.surah}:${msg.ayah}`;
+  if (key !== _trackingKey) {
+    _matchedWordIndices = new Set<number>();
+    _trackingKey = key;
+  }
+
+  // Add new matched indices to cumulative set
+  for (const idx of msg.matched_indices) {
+    _matchedWordIndices.add(idx);
+  }
+
+  // Find the highest contiguously matched index starting from 0.
+  // This prevents false forward jumps from highlighting unread words.
+  let contiguousMax = -1;
+  for (let i = 0; i <= msg.total_words; i++) {
+    if (_matchedWordIndices.has(i)) {
+      contiguousMax = i;
+    } else {
+      break;
+    }
+  }
+
   const wordEls = verseEl.querySelectorAll<HTMLElement>(".word");
   for (const wordEl of wordEls) {
     const idx = parseInt(wordEl.getAttribute("data-word-idx") || "-1");
-    if (idx <= maxIdx) {
+    if (idx <= contiguousMax) {
       wordEl.classList.add("word--spoken");
     }
   }

@@ -8,11 +8,25 @@ build/
 data/lora-adapter/
 data/lora-adapter-small/
 data/lora-checkpoints/
+data/lora-checkpoints-small/
 data/reference_audio/
 data/test_audio/
 data/train_subset/
 data/training/
 data/*.log
+
+# Model weights (too large for git)
+data/ctc-base-distilled/
+data/ctc-base-finetuned/
+data/ctc-model/
+data/ctc-model-finetuned/
+data/moonshine-finetuned/
+data/nvidia-fastconformer-quran-ft-*/
+data/rabah-ctc-pruned-6/
+data/rabah-ctc-pruned-8/
+data/rabah-ctc-pruned-12/
+data/rabah-ctc-pruned-*-finetuned/
+data/rabah-ctc-source/
 *.m4a
 *.wav
 node_modules/
