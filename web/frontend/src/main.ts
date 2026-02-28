@@ -21,7 +21,16 @@ interface RawTranscriptMessage {
   confidence: number;
 }
 
-type ServerMessage = VerseMatchMessage | RawTranscriptMessage;
+interface WordProgressMessage {
+  type: "word_progress";
+  surah: number;
+  ayah: number;
+  word_index: number;
+  total_words: number;
+  matched_indices: number[];
+}
+
+type ServerMessage = VerseMatchMessage | RawTranscriptMessage | WordProgressMessage;
 
 interface SurahVerse {
   ayah: number;
@@ -93,6 +102,41 @@ async function fetchSurah(surahNum: number): Promise<SurahData> {
 // ---------------------------------------------------------------------------
 // Verse rendering
 // ---------------------------------------------------------------------------
+// Quranic stop/waqf marks that appear as standalone tokens in Uthmani text
+// but are stripped by the normalizer (so they don't exist in text_clean)
+const WAQF_MARKS = new Set([
+  "\u06D6", "\u06D7", "\u06D8", "\u06D9", "\u06DA", "\u06DB", "\u06DC",
+]);
+
+function isWaqfToken(token: string): boolean {
+  return token.length <= 2 && [...token].every((c) => WAQF_MARKS.has(c));
+}
+
+interface WordToken {
+  text: string;       // display text (may include trailing waqf mark)
+  isRealWord: boolean; // false for standalone waqf marks (shouldn't happen after merge)
+}
+
+/**
+ * Split Uthmani text into word tokens, merging standalone waqf marks
+ * with the preceding word so that word indices align with text_clean.
+ */
+function splitUthmaniWords(text: string): WordToken[] {
+  const raw = text.split(/\s+/).filter((w) => w.length > 0);
+  const result: WordToken[] = [];
+
+  for (const token of raw) {
+    if (isWaqfToken(token) && result.length > 0) {
+      // Merge with preceding word
+      result[result.length - 1].text += " " + token;
+    } else {
+      result.push({ text: token, isRealWord: true });
+    }
+  }
+
+  return result;
+}
+
 function createVerseGroupElement(group: VerseGroup): HTMLElement {
   const el = document.createElement("div");
   el.className = "verse-group";
@@ -117,9 +161,21 @@ function createVerseGroupElement(group: VerseGroup): HTMLElement {
     verseEl.className = "verse verse--upcoming";
     verseEl.setAttribute("data-ayah", String(v.ayah));
 
+    // Split verse text into individual word spans (merging waqf marks)
+    const words = splitUthmaniWords(v.text_uthmani);
     const textEl = document.createElement("span");
     textEl.className = "verse-text";
-    textEl.textContent = v.text_uthmani;
+    for (let i = 0; i < words.length; i++) {
+      const wordEl = document.createElement("span");
+      wordEl.className = "word";
+      wordEl.setAttribute("data-word-idx", String(i));
+      wordEl.textContent = words[i].text;
+      textEl.appendChild(wordEl);
+      // Add space between words (except after the last)
+      if (i < words.length - 1) {
+        textEl.appendChild(document.createTextNode(" "));
+      }
+    }
     verseEl.appendChild(textEl);
 
     const markerEl = document.createElement("span");
@@ -215,6 +271,34 @@ async function handleVerseMatch(msg: VerseMatchMessage): Promise<void> {
   updateVerseHighlight(group, msg.ayah);
 }
 
+function handleWordProgress(msg: WordProgressMessage): void {
+  const lastGroup = state.groups[state.groups.length - 1];
+  if (!lastGroup || lastGroup.surah !== msg.surah) return;
+
+  const verseEl = lastGroup.element.querySelector<HTMLElement>(
+    `.verse[data-ayah="${msg.ayah}"]`,
+  );
+  if (!verseEl) return;
+
+  // Ensure this verse is active
+  if (!verseEl.classList.contains("verse--active")) {
+    updateVerseHighlight(lastGroup, msg.ayah);
+  }
+
+  // Highlight contiguously: all words from 0 up to the furthest
+  // matched index, so there are no gaps in the highlight
+  const maxIdx = msg.matched_indices.length > 0
+    ? Math.max(...msg.matched_indices)
+    : -1;
+  const wordEls = verseEl.querySelectorAll<HTMLElement>(".word");
+  for (const wordEl of wordEls) {
+    const idx = parseInt(wordEl.getAttribute("data-word-idx") || "-1");
+    if (idx <= maxIdx) {
+      wordEl.classList.add("word--spoken");
+    }
+  }
+}
+
 function handleRawTranscript(msg: RawTranscriptMessage): void {
   $rawTranscript.textContent = msg.text;
   $rawTranscript.classList.add("visible");
@@ -234,6 +318,8 @@ function connectWebSocket(): WebSocket {
       const msg: ServerMessage = JSON.parse(e.data);
       if (msg.type === "verse_match") {
         handleVerseMatch(msg);
+      } else if (msg.type === "word_progress") {
+        handleWordProgress(msg);
       } else if (msg.type === "raw_transcript") {
         handleRawTranscript(msg);
       }

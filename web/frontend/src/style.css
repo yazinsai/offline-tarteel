@@ -163,6 +163,26 @@ body {
   color: var(--text-faint);
 }
 
+/* ── Individual word (within a verse) ── */
+.word {
+  transition: color 0.15s ease, opacity 0.15s ease;
+}
+
+/* Active verse: unspoken words are muted, spoken words are full color */
+.verse--active .word {
+  color: var(--text-muted);
+}
+
+.verse--active .word--spoken {
+  color: var(--text);
+}
+
+/* Recited and upcoming verses: words inherit parent color */
+.verse--recited .word,
+.verse--upcoming .word {
+  color: inherit;
+}
+
 /* ── Ayah end marker (۝) ── */
 .verse-marker {
   font-size: 1.5rem;

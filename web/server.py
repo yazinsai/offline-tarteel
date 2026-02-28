@@ -29,6 +29,8 @@ from fastapi.staticfiles import StaticFiles
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from Levenshtein import ratio as lev_ratio
+
 from shared.normalizer import normalize_arabic
 from shared.quran_db import QuranDB, partial_ratio
 
@@ -48,6 +50,12 @@ VERSE_MATCH_THRESHOLD = 0.45
 FIRST_MATCH_THRESHOLD = 0.75  # higher bar before any verse is locked on
 RAW_TRANSCRIPT_THRESHOLD = 0.25
 SURROUNDING_CONTEXT = 2  # verses before/after current
+
+# Tracking mode (word-level): faster cycle once a verse is locked on
+TRACKING_TRIGGER_SECONDS = 0.5
+TRACKING_TRIGGER_SAMPLES = int(SAMPLE_RATE * TRACKING_TRIGGER_SECONDS)
+TRACKING_SILENCE_TIMEOUT = 4.0  # seconds of silence before exiting tracking
+TRACKING_SILENCE_SAMPLES = int(SAMPLE_RATE * TRACKING_SILENCE_TIMEOUT)
 
 # Model config
 NVIDIA_MODEL_ID = "nvidia/stt_ar_fastconformer_hybrid_large_pcd_v1.0"
@@ -263,6 +271,62 @@ def _get_surrounding_verses(db: QuranDB, surah: int, ayah: int) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
+# Word-level alignment (for tracking mode)
+# ---------------------------------------------------------------------------
+def _words_match(w1: str, w2: str, threshold: float = 0.7) -> bool:
+    """Check if two Arabic words match, tolerating ASR errors."""
+    if w1 == w2:
+        return True
+    if len(w1) <= 2 or len(w2) <= 2:
+        return w1 == w2
+    return lev_ratio(w1, w2) >= threshold
+
+
+def _align_position(
+    recognized_words: list[str],
+    verse_words: list[str],
+    start_from: int = 0,
+) -> tuple[int, list[int]]:
+    """Find how far into the verse the recognized words reach.
+
+    Uses greedy forward alignment: scans recognized words left-to-right
+    and matches each to the earliest available verse word from the
+    current position forward. This prevents jumping to later occurrences
+    of repeated words (e.g. "من تشاء" × 4 in 3:26).
+
+    The start_from parameter allows resuming alignment from the last
+    known position, so the rolling audio window (which may not contain
+    the verse beginning) still works for long verses.
+
+    Returns (position, matched_indices) where position is the furthest
+    verse word index reached + 1, and matched_indices lists which verse
+    word indices were matched.
+    """
+    if not recognized_words or not verse_words:
+        return 0, []
+
+    LOOKAHEAD = 5  # max words to skip in verse (handles ASR deletions)
+
+    matched_indices = []
+    verse_ptr = start_from
+
+    for rec in recognized_words:
+        if verse_ptr >= len(verse_words):
+            break
+        # Search forward from current position with limited lookahead
+        limit = min(verse_ptr + LOOKAHEAD, len(verse_words))
+        for j in range(verse_ptr, limit):
+            if _words_match(rec, verse_words[j]):
+                matched_indices.append(j)
+                verse_ptr = j + 1
+                break
+
+    if matched_indices:
+        return matched_indices[-1] + 1, matched_indices
+    return start_from, []
+
+
+# ---------------------------------------------------------------------------
 # FastAPI app
 # ---------------------------------------------------------------------------
 @asynccontextmanager
@@ -299,6 +363,37 @@ async def websocket_endpoint(ws: WebSocket):
     last_emitted_ref: tuple[int, int] | None = None
     last_emitted_text: str = ""
 
+    # Tracking mode state
+    tracking_verse: dict | None = None  # the verse we're tracking within
+    tracking_verse_words: list[str] = []  # normalized words of tracked verse
+    tracking_last_word_idx = -1  # last word_index we sent
+    silence_samples = 0  # consecutive silence samples in tracking mode
+    stale_cycles = 0  # consecutive tracking cycles with no progress
+    STALE_CYCLE_LIMIT = 4  # exit tracking after this many no-progress cycles
+
+    def _enter_tracking(verse: dict, ref: tuple[int, int]) -> None:
+        nonlocal tracking_verse, tracking_verse_words, tracking_last_word_idx
+        nonlocal silence_samples, stale_cycles
+        tracking_verse = verse
+        tracking_verse_words = verse["text_clean"].split()
+        tracking_last_word_idx = -1
+        silence_samples = 0
+        stale_cycles = 0
+        log.info(
+            "TRACKING enter %s:%s (%d words)",
+            ref[0], ref[1], len(tracking_verse_words),
+        )
+
+    def _exit_tracking(reason: str) -> None:
+        nonlocal tracking_verse, tracking_verse_words, tracking_last_word_idx
+        nonlocal silence_samples, stale_cycles
+        log.info("TRACKING exit: %s", reason)
+        tracking_verse = None
+        tracking_verse_words = []
+        tracking_last_word_idx = -1
+        silence_samples = 0
+        stale_cycles = 0
+
     try:
         while True:
             data = await ws.receive_bytes()
@@ -310,7 +405,144 @@ async def websocket_endpoint(ws: WebSocket):
             if len(full_audio) > MAX_WINDOW_SAMPLES:
                 full_audio = full_audio[-MAX_WINDOW_SAMPLES:]
 
-            # Only process when enough new audio has accumulated
+            # ---------------------------------------------------------------
+            # TRACKING MODE: fast cycle for word-level progress
+            # ---------------------------------------------------------------
+            if tracking_verse is not None:
+                # Check silence accumulation
+                chunk_rms = float(np.sqrt(np.mean(samples**2)))
+                if chunk_rms < SILENCE_RMS_THRESHOLD:
+                    silence_samples += len(samples)
+                    if silence_samples >= TRACKING_SILENCE_SAMPLES:
+                        _exit_tracking("extended silence")
+                        new_audio_count = 0
+                        continue
+                else:
+                    silence_samples = 0
+
+                # Faster trigger in tracking mode
+                if new_audio_count < TRACKING_TRIGGER_SAMPLES:
+                    continue
+                new_audio_count = 0
+
+                # Transcribe
+                text = await asyncio.get_event_loop().run_in_executor(
+                    None, _transcribe, full_audio.copy()
+                )
+
+                if not text or len(text.strip()) < 3:
+                    continue
+
+                recognized_words = text.split()
+
+                # Align against known verse, starting from last
+                # known position (handles rolling window that may
+                # not contain the verse beginning)
+                resume_from = max(tracking_last_word_idx, 0)
+                word_pos, matched_indices = _align_position(
+                    recognized_words, tracking_verse_words,
+                    start_from=resume_from,
+                )
+
+                # Check for stale tracking (no progress)
+                advanced = (
+                    matched_indices
+                    and matched_indices[-1] > tracking_last_word_idx
+                )
+                if not advanced:
+                    stale_cycles += 1
+                    if stale_cycles >= STALE_CYCLE_LIMIT:
+                        _exit_tracking(
+                            f"stale ({stale_cycles} cycles, no progress)"
+                        )
+                        new_audio_count = 0
+                        continue
+                else:
+                    stale_cycles = 0
+
+                # Send word_progress if we've advanced
+                if advanced:
+                    tracking_last_word_idx = matched_indices[-1]
+                    await ws.send_json(
+                        {
+                            "type": "word_progress",
+                            "surah": tracking_verse["surah"],
+                            "ayah": tracking_verse["ayah"],
+                            "word_index": word_pos,
+                            "total_words": len(tracking_verse_words),
+                            "matched_indices": matched_indices,
+                        }
+                    )
+                    log.info(
+                        "TRACKING %s:%s word %d/%d  indices=%s",
+                        tracking_verse["surah"],
+                        tracking_verse["ayah"],
+                        word_pos,
+                        len(tracking_verse_words),
+                        matched_indices[-5:],  # last few for brevity
+                    )
+
+                # Check if verse is complete (always check, not just
+                # when advancing — the verse may already be complete
+                # on the first tracking cycle)
+                if matched_indices:
+                    coverage = len(matched_indices) / len(tracking_verse_words)
+                    near_end = matched_indices[-1] >= len(tracking_verse_words) - 2
+                    if coverage >= 0.8 and near_end:
+                        log.info(
+                            "TRACKING verse complete %s:%s (coverage=%.0f%%)",
+                            tracking_verse["surah"],
+                            tracking_verse["ayah"],
+                            coverage * 100,
+                        )
+                        # Advance to next verse
+                        cur_ref = (
+                            tracking_verse["surah"],
+                            tracking_verse["ayah"],
+                        )
+                        last_emitted_ref = cur_ref
+                        last_emitted_text = normalize_arabic(
+                            tracking_verse["text_clean"]
+                        )
+                        next_v = quran_db.get_next_verse(*cur_ref)
+                        _exit_tracking("verse complete")
+
+                        if next_v:
+                            # Send verse_match for the next verse so
+                            # frontend advances highlighting
+                            next_ref = (next_v["surah"], next_v["ayah"])
+                            surrounding = _get_surrounding_verses(
+                                quran_db, next_v["surah"], next_v["ayah"]
+                            )
+                            await ws.send_json(
+                                {
+                                    "type": "verse_match",
+                                    "surah": next_v["surah"],
+                                    "ayah": next_v["ayah"],
+                                    "verse_text": next_v["text_uthmani"],
+                                    "surah_name": next_v["surah_name"],
+                                    "confidence": 0.99,
+                                    "surrounding_verses": surrounding,
+                                }
+                            )
+                            last_emitted_ref = next_ref
+                            last_emitted_text = normalize_arabic(
+                                next_v["text_clean"]
+                            )
+                            _enter_tracking(next_v, next_ref)
+
+                        # Reset audio window — keep more context (last 2s)
+                        # so next verse tracking has something to work with
+                        keep_samples = min(
+                            len(full_audio), TRIGGER_SAMPLES
+                        )
+                        full_audio = full_audio[-keep_samples:].copy()
+
+                continue  # stay in tracking loop
+
+            # ---------------------------------------------------------------
+            # DISCOVERY MODE: normal 2-second cycle
+            # ---------------------------------------------------------------
             if new_audio_count < TRIGGER_SAMPLES:
                 continue
             new_audio_count = 0
@@ -433,8 +665,15 @@ async def websocket_endpoint(ws: WebSocket):
                     or (verse["text_clean"] if verse else "")
                 )
 
-                # Reset window for next verse detection
-                full_audio = tail.copy()
+                # Enter tracking mode for this verse
+                if verse:
+                    _enter_tracking(verse, ref)
+                    # Keep full audio buffer — tracking needs it to
+                    # detect if the verse is already complete (reader
+                    # may be ahead of the system for short verses)
+                else:
+                    # No tracking — reset window for next discovery
+                    full_audio = tail.copy()
             else:
                 score = round(match["score"], 2) if match else 0.0
                 log.info("  (below threshold %.2f — sending raw_transcript, score=%.2f)", effective_threshold, score)
