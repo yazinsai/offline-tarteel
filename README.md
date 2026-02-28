@@ -40,10 +40,11 @@ As of **February 27, 2026**, the table below reflects best full-corpus (54-sampl
 ## Experiment status
 
 - **NVIDIA FastConformer** is the top model: 85% SeqAcc, 115 MB, 0.33s latency.
-- **FastConformer fine-tune sweep regressed across all tested variants (v1/v2a/v2b).**  
+- **FastConformer fine-tune sweep regressed across all tested variants (v1/v2a/v2b/v3c).**  
   v1 (Rabah+RetaSy, 2K steps): 81% SeqAcc / 84% recall (`benchmark/results/2026-02-27_092540.json`)  
   v2a (Rabah+RetaSy, LR=2e-5, 1K steps): 80% SeqAcc / 81% recall (`benchmark/results/2026-02-27_104327.json`)  
   v2b (Quran-only, LR=2e-5, 1K steps): 81% SeqAcc / 83% recall (`benchmark/results/2026-02-27_115055.json`)  
+  v3c (Quran-only, LR=1e-5, 6K steps, freeze=12): 80% SeqAcc / 81% recall (`benchmark/results/2026-02-27_163433.json`)  
   All produced larger local checkpoints (~459 MB) and none beat pretrained baseline (85%/87%).
 - **Rabah pruned+fine-tuned path now works.** Fine-tuning the CTC head on pruned representations recovered accuracy from 12% to 72% (8-layer first_n). The 8L int8 model is 145 MB -- well under the 200 MB target. The key insight: `first_n` pruning (keep layers 0-7) vastly outperforms `evenly_spaced` (72% vs 56%).
 - **Two-stage faster-whisper path** now runs with int8 Stage 2 at 306 MB and 3.96s (down from 582 MB / 10s), but still trails on accuracy (70% SeqAcc).

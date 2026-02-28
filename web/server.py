@@ -326,24 +326,63 @@ async def websocket_endpoint(ws: WebSocket):
             if not text or not text.strip():
                 continue
 
+            audio_len = len(full_audio) / SAMPLE_RATE
             log.info(
                 "Transcribed (%.1fs): %s",
-                len(full_audio) / SAMPLE_RATE,
+                audio_len,
                 text[:120],
             )
 
-            # Match against QuranDB (span-aware)
+            # Match against QuranDB (span-aware, with continuation bias)
             match = quran_db.match_verse(
                 text,
                 threshold=RAW_TRANSCRIPT_THRESHOLD,
                 max_span=4,
+                hint=last_emitted_ref,
+                return_top_k=5,
             )
+
+            # --- Debug log: full prediction table ---
+            hint_str = (
+                f"{last_emitted_ref[0]}:{last_emitted_ref[1]}"
+                if last_emitted_ref
+                else "none"
+            )
+            if match:
+                ayah_end = match.get("ayah_end", "")
+                end_str = f"-{ayah_end}" if ayah_end else ""
+                log.info(
+                    "MATCH  %s:%s%s  score=%.3f (raw=%.3f +bonus=%.3f)  hint=%s",
+                    match["surah"],
+                    match["ayah"],
+                    end_str,
+                    match["score"],
+                    match.get("raw_score", match["score"]),
+                    match.get("bonus", 0.0),
+                    hint_str,
+                )
+                for i, r in enumerate(match.get("runners_up", []), 1):
+                    tag = " <<<" if r.get("bonus", 0) > 0 else ""
+                    log.info(
+                        "  #%d  %s:%s  score=%.3f (raw=%.3f +%.3f)  %s%s",
+                        i,
+                        r["surah"],
+                        r["ayah"],
+                        r["score"],
+                        r["raw_score"],
+                        r["bonus"],
+                        r["text_clean"][:40],
+                        tag,
+                    )
+            else:
+                log.info("NO MATCH (below %.2f)  hint=%s", RAW_TRANSCRIPT_THRESHOLD, hint_str)
 
             if match and match["score"] >= VERSE_MATCH_THRESHOLD:
                 ref = (match["surah"], match["ayah"])
 
                 # Dedup: skip if same verse was just sent
                 if ref == last_emitted_ref:
+                    log.info("  (dedup — same as last emitted, skipping)")
                     continue
 
                 verse = quran_db.get_verse(match["surah"], match["ayah"])
@@ -365,17 +404,24 @@ async def websocket_endpoint(ws: WebSocket):
                     }
                 )
 
+                log.info(
+                    ">>> EMITTED verse_match %s:%s (was %s)",
+                    match["surah"],
+                    match["ayah"],
+                    hint_str,
+                )
                 last_emitted_ref = ref
 
                 # Reset window for next verse detection
                 full_audio = tail.copy()
             else:
-                # Low confidence — send raw transcript
+                score = round(match["score"], 2) if match else 0.0
+                log.info("  (below threshold %.2f — sending raw_transcript, score=%.2f)", VERSE_MATCH_THRESHOLD, score)
                 await ws.send_json(
                     {
                         "type": "raw_transcript",
                         "text": text,
-                        "confidence": round(match["score"], 2) if match else 0.0,
+                        "confidence": score,
                     }
                 )
 
