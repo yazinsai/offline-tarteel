@@ -29,7 +29,9 @@ data/rabah-ctc-pruned-*-finetuned/
 data/rabah-ctc-source/
 *.m4a
 *.wav
+*.onnx
 node_modules/
+.worktrees/
 
 # Benchmark timestamped results (latest.json is tracked)
 benchmark/results/2026-*.json
