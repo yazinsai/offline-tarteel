@@ -711,6 +711,11 @@ async def websocket_endpoint(ws: WebSocket):
 # ---------------------------------------------------------------------------
 # REST API
 # ---------------------------------------------------------------------------
+@app.get("/api/status")
+async def get_status():
+    return {"model_loaded": _nemo_model is not None}
+
+
 @app.get("/api/surah/{surah_num}")
 async def get_surah(surah_num: int):
     verses = quran_db.get_surah(surah_num)

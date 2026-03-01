@@ -475,8 +475,31 @@ async function startAudio(): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
+// Model status polling
+// ---------------------------------------------------------------------------
+async function pollModelStatus(): Promise<void> {
+  const $status = document.getElementById("model-status")!;
+  const poll = async () => {
+    try {
+      const res = await fetch("/api/status");
+      const data = await res.json();
+      if (data.model_loaded) {
+        $status.textContent = "Model ready";
+        $status.classList.add("ready");
+        return;
+      }
+    } catch {
+      // server not up yet
+    }
+    setTimeout(poll, 1000);
+  };
+  poll();
+}
+
+// ---------------------------------------------------------------------------
 // Init
 // ---------------------------------------------------------------------------
 document.addEventListener("DOMContentLoaded", () => {
+  pollModelStatus();
   startAudio();
 });

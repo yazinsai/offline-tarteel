@@ -349,6 +349,64 @@ body {
   line-height: 1.5;
 }
 
+/* ── Offline badge ── */
+#offline-badge {
+  position: fixed;
+  top: 1rem;
+  left: 50%;
+  transform: translateX(-50%);
+  font-family: var(--font-system);
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  letter-spacing: 0.03em;
+  display: flex;
+  align-items: center;
+  gap: 0.4em;
+  white-space: nowrap;
+  padding: 0.4rem 0.85rem;
+  border-radius: 999px;
+  background: rgba(245, 240, 232, 0.65);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(200, 190, 170, 0.25);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.04);
+  z-index: 20;
+}
+
+.badge-sep {
+  opacity: 0.4;
+}
+
+#model-status {
+  transition: color 0.3s ease;
+}
+
+#model-status::before {
+  content: "";
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  margin-right: 0.35em;
+  vertical-align: middle;
+  background: var(--text-muted);
+  animation: status-pulse 1.5s ease-in-out infinite;
+}
+
+#model-status.ready::before {
+  background: #7a9a5a;
+  animation: none;
+}
+
+#model-status.ready {
+  color: var(--text-light);
+}
+
+@keyframes status-pulse {
+  0%, 100% { opacity: 0.4; }
+  50% { opacity: 1; }
+}
+
 /* ── Responsive ── */
 @media (max-width: 960px) {
   .verse-body {
