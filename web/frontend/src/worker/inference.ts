@@ -7,6 +7,10 @@ import { RecitationTracker } from "../lib/tracker";
 import { normalizeArabic } from "../lib/normalizer";
 import type { WorkerInbound, WorkerOutbound } from "../lib/types";
 
+// Model URL: for dev, place the .onnx file in public/.
+// For production, host on GitHub Releases, HF Hub, or CDN and update this URL.
+const MODEL_URL = "/fastconformer_ar_ctc_q8.onnx";
+
 let tracker: RecitationTracker | null = null;
 let decoder: CTCDecoder | null = null;
 
@@ -34,7 +38,7 @@ async function init() {
 
   // Load ONNX model
   const modelBuffer = await loadModel(
-    "/fastconformer_ar_ctc.onnx",
+    MODEL_URL,
     (loaded, total) => {
       post({
         type: "loading",

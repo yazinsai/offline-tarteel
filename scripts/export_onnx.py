@@ -67,7 +67,8 @@ def validate_onnx():
     )
     if isinstance(outputs_nemo, tuple):
         outputs_nemo = outputs_nemo[0]
-    nemo_text = outputs_nemo[0] if isinstance(outputs_nemo, list) else str(outputs_nemo)
+    raw_out = outputs_nemo[0] if isinstance(outputs_nemo, list) else outputs_nemo
+    nemo_text = raw_out.text if hasattr(raw_out, "text") else str(raw_out)
     print(f"NeMo output:  {nemo_text[:100]}")
 
     # ONNX inference with NeMo's own preprocessor
@@ -121,10 +122,29 @@ def validate_onnx():
         print(f"  ONNX: {onnx_text}")
 
 
+def quantize():
+    """Quantize the ONNX model to uint8 for smaller download size."""
+    from onnxruntime.quantization import quantize_dynamic, QuantType
+
+    input_path = PROJECT_ROOT / "data" / "fastconformer_ar_ctc.onnx"
+    output_path = PROJECT_ROOT / "data" / "fastconformer_ar_ctc_q8.onnx"
+
+    if not input_path.exists():
+        print(f"ONNX model not found: {input_path}")
+        return
+
+    print(f"Quantizing: {input_path} ({input_path.stat().st_size / 1e6:.1f} MB)")
+    quantize_dynamic(str(input_path), str(output_path), weight_type=QuantType.QUInt8)
+    print(f"Quantized:  {output_path} ({output_path.stat().st_size / 1e6:.1f} MB)")
+
+
 if __name__ == "__main__":
     if "--validate" in sys.argv:
         validate_onnx()
+    elif "--quantize" in sys.argv:
+        quantize()
     else:
         export_onnx()
+        quantize()
         if "--skip-validate" not in sys.argv:
             validate_onnx()
