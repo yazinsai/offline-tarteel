@@ -9,7 +9,9 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@fontsource/amiri": "^5.2.8"
+    "@fontsource/amiri": "^5.2.8",
+    "@huggingface/transformers": "^3.8.1",
+    "onnxruntime-web": "^1.24.2"
   },
   "devDependencies": {
     "typescript": "~5.9.3",
