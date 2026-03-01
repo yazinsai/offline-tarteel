@@ -2,36 +2,17 @@ import "@fontsource/amiri/400.css";
 import "@fontsource/amiri/700.css";
 import "./style.css";
 
+import type {
+  VerseMatchMessage,
+  RawTranscriptMessage,
+  WordProgressMessage,
+  WorkerOutbound,
+  QuranVerse,
+} from "./lib/types";
+
 // ---------------------------------------------------------------------------
-// Types
+// Types (UI-only)
 // ---------------------------------------------------------------------------
-interface VerseMatchMessage {
-  type: "verse_match";
-  surah: number;
-  ayah: number;
-  verse_text: string;
-  surah_name: string;
-  confidence: number;
-  surrounding_verses: { surah: number; ayah: number; text: string; is_current: boolean }[];
-}
-
-interface RawTranscriptMessage {
-  type: "raw_transcript";
-  text: string;
-  confidence: number;
-}
-
-interface WordProgressMessage {
-  type: "word_progress";
-  surah: number;
-  ayah: number;
-  word_index: number;
-  total_words: number;
-  matched_indices: number[];
-}
-
-type ServerMessage = VerseMatchMessage | RawTranscriptMessage | WordProgressMessage;
-
 interface SurahVerse {
   ayah: number;
   text_uthmani: string;
@@ -58,12 +39,13 @@ interface VerseGroup {
 // ---------------------------------------------------------------------------
 const state = {
   groups: [] as VerseGroup[],
-  ws: null as WebSocket | null,
+  worker: null as Worker | null,
   audioCtx: null as AudioContext | null,
   stream: null as MediaStream | null,
   isActive: false,
   hasFirstMatch: false,
   surahCache: new Map<number, SurahData>(),
+  quranData: null as QuranVerse[] | null,
 };
 
 // ---------------------------------------------------------------------------
@@ -74,6 +56,7 @@ const $rawTranscript = document.getElementById("raw-transcript")!;
 const $indicator = document.getElementById("listening-indicator")!;
 const $permissionPrompt = document.getElementById("permission-prompt")!;
 const $listeningStatus = document.getElementById("listening-status")!;
+const $modelStatus = document.getElementById("model-status")!;
 
 // ---------------------------------------------------------------------------
 // Arabic numeral converter
@@ -87,14 +70,31 @@ function toArabicNum(n: number): string {
 }
 
 // ---------------------------------------------------------------------------
-// Surah data fetching
+// Surah data (loaded from quran.json, no server needed)
 // ---------------------------------------------------------------------------
+async function loadQuranData(): Promise<void> {
+  if (state.quranData) return;
+  const res = await fetch("/quran.json");
+  state.quranData = await res.json();
+}
+
 async function fetchSurah(surahNum: number): Promise<SurahData> {
   const cached = state.surahCache.get(surahNum);
   if (cached) return cached;
 
-  const res = await fetch(`/api/surah/${surahNum}`);
-  const data: SurahData = await res.json();
+  await loadQuranData();
+  const verses = state.quranData!.filter((v) => v.surah === surahNum);
+  if (!verses.length) throw new Error(`Surah ${surahNum} not found`);
+
+  const data: SurahData = {
+    surah: surahNum,
+    surah_name: verses[0].surah_name,
+    surah_name_en: verses[0].surah_name_en,
+    verses: verses.map((v) => ({
+      ayah: v.ayah,
+      text_uthmani: v.text_uthmani,
+    })),
+  };
   state.surahCache.set(surahNum, data);
   return data;
 }
@@ -102,8 +102,6 @@ async function fetchSurah(surahNum: number): Promise<SurahData> {
 // ---------------------------------------------------------------------------
 // Verse rendering
 // ---------------------------------------------------------------------------
-// Quranic stop/waqf marks that appear as standalone tokens in Uthmani text
-// but are stripped by the normalizer (so they don't exist in text_clean)
 const WAQF_MARKS = new Set([
   "\u06D6", "\u06D7", "\u06D8", "\u06D9", "\u06DA", "\u06DB", "\u06DC",
 ]);
@@ -113,21 +111,16 @@ function isWaqfToken(token: string): boolean {
 }
 
 interface WordToken {
-  text: string;       // display text (may include trailing waqf mark)
-  isRealWord: boolean; // false for standalone waqf marks (shouldn't happen after merge)
+  text: string;
+  isRealWord: boolean;
 }
 
-/**
- * Split Uthmani text into word tokens, merging standalone waqf marks
- * with the preceding word so that word indices align with text_clean.
- */
 function splitUthmaniWords(text: string): WordToken[] {
   const raw = text.split(/\s+/).filter((w) => w.length > 0);
   const result: WordToken[] = [];
 
   for (const token of raw) {
     if (isWaqfToken(token) && result.length > 0) {
-      // Merge with preceding word
       result[result.length - 1].text += " " + token;
     } else {
       result.push({ text: token, isRealWord: true });
@@ -137,13 +130,9 @@ function splitUthmaniWords(text: string): WordToken[] {
   return result;
 }
 
-// Bismillah: 4 words "بسم الله الرحمن الرحيم"
-// We detect it by stripping diacritics and comparing base letters,
-// since the Uthmani text may have different diacritic orderings.
 const BISMILLAH_WORD_COUNT = 4;
 const BISMILLAH_BASE = "بسم الله الرحمن الرحيم";
 
-/** Strip Arabic diacritics (tashkeel) for comparison */
 function stripDiacritics(s: string): string {
   return s.replace(/[\u0610-\u061A\u064B-\u065F\u0670\u06D6-\u06DC\u06DF-\u06E4\u06E7\u06E8\u06EA-\u06ED]/g, "");
 }
@@ -158,19 +147,16 @@ function createVerseGroupElement(group: VerseGroup): HTMLElement {
   el.className = "verse-group";
   el.setAttribute("data-surah", String(group.surah));
 
-  // Surah header
   const header = document.createElement("div");
   header.className = "surah-header";
   header.textContent = group.surahNameEn;
   el.appendChild(header);
 
-  // Bismillah line (separate from verse text) for surahs that have it
   const hasBismillah =
     group.surah !== 1 &&
     group.surah !== 9 &&
     startsWithBismillah(group.verses[0]?.text_uthmani ?? "");
   if (hasBismillah) {
-    // Extract the actual bismillah text (first 4 words) from the verse
     const words = group.verses[0].text_uthmani.split(/\s+/);
     const bsmText = words.slice(0, BISMILLAH_WORD_COUNT).join(" ");
     const bsmEl = document.createElement("div");
@@ -181,7 +167,6 @@ function createVerseGroupElement(group: VerseGroup): HTMLElement {
     el.appendChild(bsmEl);
   }
 
-  // Flowing verse body — all verses as inline spans
   const body = document.createElement("div");
   body.className = "verse-body";
   body.dir = "rtl";
@@ -192,11 +177,7 @@ function createVerseGroupElement(group: VerseGroup): HTMLElement {
     verseEl.className = "verse verse--upcoming";
     verseEl.setAttribute("data-ayah", String(v.ayah));
 
-    // Split verse text into individual word spans (merging waqf marks)
     const allWords = splitUthmaniWords(v.text_uthmani);
-
-    // For ayah 1, skip the bismillah words (already shown in header)
-    // but keep the data-word-idx aligned with the server's text_clean
     const skipBsm = hasBismillah && v.ayah === 1;
     const startIdx = skipBsm ? BISMILLAH_WORD_COUNT : 0;
 
@@ -208,7 +189,6 @@ function createVerseGroupElement(group: VerseGroup): HTMLElement {
       wordEl.setAttribute("data-word-idx", String(i));
       wordEl.textContent = allWords[i].text;
       textEl.appendChild(wordEl);
-      // Add space between words (except after the last)
       if (i < allWords.length - 1) {
         textEl.appendChild(document.createTextNode(" "));
       }
@@ -231,14 +211,12 @@ function updateVerseHighlight(group: VerseGroup, newAyah: number): void {
   const el = group.element;
   const oldAyah = group.currentAyah;
 
-  // Mark all ayahs between old and new (inclusive of old) as recited
   const verses = el.querySelectorAll<HTMLElement>(".verse");
   for (const verseEl of verses) {
     const ayah = parseInt(verseEl.getAttribute("data-ayah") || "0");
     if (ayah === newAyah) {
       verseEl.className = "verse verse--active";
     } else if (ayah <= newAyah && (ayah >= oldAyah || ayah < oldAyah)) {
-      // Mark as recited if it was active or skipped
       if (
         verseEl.classList.contains("verse--active") ||
         (ayah > oldAyah && ayah < newAyah) ||
@@ -267,7 +245,6 @@ async function handleVerseMatch(msg: VerseMatchMessage): Promise<void> {
   $rawTranscript.textContent = "";
   $rawTranscript.classList.remove("visible");
 
-  // First match: hide listening status, show indicator with has-verses
   if (!state.hasFirstMatch) {
     state.hasFirstMatch = true;
     $listeningStatus.hidden = true;
@@ -276,16 +253,13 @@ async function handleVerseMatch(msg: VerseMatchMessage): Promise<void> {
 
   const lastGroup = state.groups[state.groups.length - 1];
 
-  // Same surah as current group — just move the highlight
   if (lastGroup && lastGroup.surah === msg.surah) {
     updateVerseHighlight(lastGroup, msg.ayah);
     return;
   }
 
-  // New surah — fade out old group, fetch full surah, render
   if (lastGroup) {
     lastGroup.element.classList.add("verse-group--exiting");
-    // Remove after animation completes
     const oldEl = lastGroup.element;
     setTimeout(() => oldEl.remove(), 400);
   }
@@ -296,7 +270,7 @@ async function handleVerseMatch(msg: VerseMatchMessage): Promise<void> {
     surah: msg.surah,
     surahName: surahData.surah_name,
     surahNameEn: surahData.surah_name_en,
-    currentAyah: 0, // will be set by updateVerseHighlight
+    currentAyah: 0,
     verses: surahData.verses,
     element: document.createElement("div"),
   };
@@ -304,13 +278,11 @@ async function handleVerseMatch(msg: VerseMatchMessage): Promise<void> {
   state.groups.push(group);
   $verses.appendChild(group.element);
 
-  // Set the active verse highlight
   updateVerseHighlight(group, msg.ayah);
 }
 
-// Cumulative set of matched word indices for the current tracking verse
 let _matchedWordIndices = new Set<number>();
-let _trackingKey = "";  // "surah:ayah" to detect verse changes
+let _trackingKey = "";
 
 function handleWordProgress(msg: WordProgressMessage): void {
   const lastGroup = state.groups[state.groups.length - 1];
@@ -321,25 +293,20 @@ function handleWordProgress(msg: WordProgressMessage): void {
   );
   if (!verseEl) return;
 
-  // Ensure this verse is active
   if (!verseEl.classList.contains("verse--active")) {
     updateVerseHighlight(lastGroup, msg.ayah);
   }
 
-  // Reset cumulative indices when tracking a new verse
   const key = `${msg.surah}:${msg.ayah}`;
   if (key !== _trackingKey) {
     _matchedWordIndices = new Set<number>();
     _trackingKey = key;
   }
 
-  // Add new matched indices to cumulative set
   for (const idx of msg.matched_indices) {
     _matchedWordIndices.add(idx);
   }
 
-  // Find the highest contiguously matched index starting from 0.
-  // This prevents false forward jumps from highlighting unread words.
   let contiguousMax = -1;
   for (let i = 0; i <= msg.total_words; i++) {
     if (_matchedWordIndices.has(i)) {
@@ -364,41 +331,22 @@ function handleRawTranscript(msg: RawTranscriptMessage): void {
 }
 
 // ---------------------------------------------------------------------------
-// WebSocket
+// Worker message handler
 // ---------------------------------------------------------------------------
-function connectWebSocket(): WebSocket {
-  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-  const url = `${protocol}//${window.location.host}/ws`;
-  const ws = new WebSocket(url);
-  ws.binaryType = "arraybuffer";
-
-  ws.onmessage = (e: MessageEvent) => {
-    try {
-      const msg: ServerMessage = JSON.parse(e.data);
-      if (msg.type === "verse_match") {
-        handleVerseMatch(msg);
-      } else if (msg.type === "word_progress") {
-        handleWordProgress(msg);
-      } else if (msg.type === "raw_transcript") {
-        handleRawTranscript(msg);
-      }
-    } catch {
-      // ignore non-JSON
-    }
-  };
-
-  ws.onclose = () => {
-    state.ws = null;
-    if (state.isActive) {
-      setTimeout(() => {
-        if (state.isActive) {
-          state.ws = connectWebSocket();
-        }
-      }, 2000);
-    }
-  };
-
-  return ws;
+function handleWorkerMessage(msg: WorkerOutbound): void {
+  if (msg.type === "loading") {
+    $modelStatus.textContent = `Loading model... ${msg.percent}%`;
+    $modelStatus.classList.remove("ready");
+  } else if (msg.type === "ready") {
+    $modelStatus.textContent = "Model ready";
+    $modelStatus.classList.add("ready");
+  } else if (msg.type === "verse_match") {
+    handleVerseMatch(msg);
+  } else if (msg.type === "word_progress") {
+    handleWordProgress(msg);
+  } else if (msg.type === "raw_transcript") {
+    handleRawTranscript(msg);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -415,18 +363,7 @@ async function startAudio(): Promise<void> {
     });
     state.stream = stream;
     $permissionPrompt.hidden = true;
-
-    // Show listening status
     $listeningStatus.hidden = false;
-
-    const ws = connectWebSocket();
-    state.ws = ws;
-
-    await new Promise<void>((resolve, reject) => {
-      ws.onopen = () => resolve();
-      ws.onerror = () => reject(new Error("WebSocket failed"));
-      setTimeout(() => reject(new Error("WebSocket timeout")), 5000);
-    });
 
     const audioCtx = new AudioContext();
     state.audioCtx = audioCtx;
@@ -436,8 +373,12 @@ async function startAudio(): Promise<void> {
     const processor = new AudioWorkletNode(audioCtx, "audio-stream-processor");
 
     processor.port.onmessage = (e: MessageEvent) => {
-      if (state.ws && state.ws.readyState === WebSocket.OPEN) {
-        state.ws.send(e.data);
+      if (state.worker) {
+        const samples = new Float32Array(e.data as ArrayBuffer);
+        state.worker.postMessage(
+          { type: "audio", samples },
+          [samples.buffer],
+        );
       }
     };
 
@@ -475,31 +416,23 @@ async function startAudio(): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
-// Model status polling
-// ---------------------------------------------------------------------------
-async function pollModelStatus(): Promise<void> {
-  const $status = document.getElementById("model-status")!;
-  const poll = async () => {
-    try {
-      const res = await fetch("/api/status");
-      const data = await res.json();
-      if (data.model_loaded) {
-        $status.textContent = "Model ready";
-        $status.classList.add("ready");
-        return;
-      }
-    } catch {
-      // server not up yet
-    }
-    setTimeout(poll, 1000);
-  };
-  poll();
-}
-
-// ---------------------------------------------------------------------------
 // Init
 // ---------------------------------------------------------------------------
 document.addEventListener("DOMContentLoaded", () => {
-  pollModelStatus();
+  // Create inference worker
+  const worker = new Worker(
+    new URL("./worker/inference.ts", import.meta.url),
+    { type: "module" },
+  );
+  state.worker = worker;
+
+  worker.onmessage = (e: MessageEvent<WorkerOutbound>) => {
+    handleWorkerMessage(e.data);
+  };
+
+  // Initialize worker (loads model, vocab, quranDB)
+  worker.postMessage({ type: "init" });
+
+  // Start audio capture
   startAudio();
 });
