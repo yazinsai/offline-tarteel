@@ -357,6 +357,12 @@ function handleWorkerMessage(msg: WorkerOutbound): void {
     $modelStatus.classList.remove("ready");
     $loadingProgress.style.width = `${msg.percent}%`;
     $loadingDetail.textContent = `Downloading model — ${msg.percent}%`;
+  } else if (msg.type === "loading_status") {
+    $loadingDetail.textContent = msg.message;
+  } else if (msg.type === "error") {
+    $loadingDetail.textContent = `Error: ${msg.message}`;
+    $modelStatus.textContent = "Error";
+    console.error("Worker reported error:", msg.message);
   } else if (msg.type === "ready") {
     $modelStatus.textContent = "Model ready";
     $modelStatus.classList.add("ready");
@@ -469,6 +475,11 @@ document.addEventListener("DOMContentLoaded", () => {
 
   worker.onmessage = (e: MessageEvent<WorkerOutbound>) => {
     handleWorkerMessage(e.data);
+  };
+
+  worker.onerror = (e) => {
+    console.error("Worker error:", e);
+    $loadingDetail.textContent = `Worker error: ${e.message || "unknown"}`;
   };
 
   // Initialize worker (loads model, vocab, quranDB)

@@ -42,7 +42,9 @@ export type WorkerInbound =
 // Worker -> Main
 export type WorkerOutbound =
   | { type: "loading"; percent: number }
+  | { type: "loading_status"; message: string }
   | { type: "ready" }
+  | { type: "error"; message: string }
   | VerseMatchMessage
   | WordProgressMessage
   | RawTranscriptMessage;

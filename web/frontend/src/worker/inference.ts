@@ -30,31 +30,44 @@ async function transcribe(audio: Float32Array): Promise<string> {
 }
 
 async function init() {
-  // Load vocab
-  const vocabRes = await fetch("/vocab.json");
-  const vocabJson = await vocabRes.json();
-  decoder = new CTCDecoder(vocabJson);
+  try {
+    // Load vocab
+    post({ type: "loading_status", message: "Loading vocabulary..." });
+    const vocabRes = await fetch("/vocab.json");
+    if (!vocabRes.ok) throw new Error(`vocab.json fetch failed: ${vocabRes.status}`);
+    const vocabJson = await vocabRes.json();
+    decoder = new CTCDecoder(vocabJson);
 
-  // Load ONNX model
-  const modelBuffer = await loadModel(
-    MODEL_URL,
-    (loaded, total) => {
-      post({
-        type: "loading",
-        percent: total ? Math.round((loaded / total) * 100) : 0,
-      });
-    },
-  );
-  await createSession(modelBuffer);
+    // Load ONNX model
+    post({ type: "loading_status", message: "Downloading model..." });
+    const modelBuffer = await loadModel(
+      MODEL_URL,
+      (loaded, total) => {
+        post({
+          type: "loading",
+          percent: total ? Math.round((loaded / total) * 100) : 0,
+        });
+      },
+    );
 
-  // Load QuranDB
-  const quranRes = await fetch("/quran.json");
-  const quranData = await quranRes.json();
-  db = new QuranDB(quranData);
+    post({ type: "loading_status", message: "Creating inference session..." });
+    await createSession(modelBuffer);
 
-  // Create tracker
-  tracker = new RecitationTracker(db, transcribe);
-  post({ type: "ready" });
+    // Load QuranDB
+    post({ type: "loading_status", message: "Loading Quran data..." });
+    const quranRes = await fetch("/quran.json");
+    if (!quranRes.ok) throw new Error(`quran.json fetch failed: ${quranRes.status}`);
+    const quranData = await quranRes.json();
+    db = new QuranDB(quranData);
+
+    // Create tracker
+    tracker = new RecitationTracker(db, transcribe);
+    post({ type: "ready" });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error("Worker init failed:", message);
+    post({ type: "error", message });
+  }
 }
 
 self.onmessage = async (e: MessageEvent<WorkerInbound>) => {
