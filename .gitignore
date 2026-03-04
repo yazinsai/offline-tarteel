@@ -49,3 +49,4 @@ experiments/contrastive/checkpoints/
 experiments/contrastive/logs/
 experiments/embedding-search/audio_corpus/
 experiments/embedding-search/indices/
+data/fastconformer-phoneme-v1/model.nemo
