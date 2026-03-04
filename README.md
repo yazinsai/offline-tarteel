@@ -2,6 +2,216 @@
 
 Offline Quran verse recognition. Record someone reciting, identify the surah and ayah -- no internet required.
 
+**Best model:** NVIDIA FastConformer -- **87% recall**, **115 MB**, **0.33s latency**. Available as a quantized ONNX file (131 MB) that runs in browsers, React Native, and Python.
+
+## Use in your app
+
+The model takes 16 kHz audio and returns a surah/ayah prediction. The pipeline has 4 steps:
+
+1. **Audio** -- Record or load a `.wav` at 16 kHz mono
+2. **Mel spectrogram** -- 80-bin NeMo-compatible features
+3. **ONNX inference** -- Run the model, get CTC logprobs
+4. **Decode + match** -- Greedy CTC decode, then fuzzy-match against all 6,236 Quran verses
+
+### Get the model
+
+Download the quantized ONNX model (131 MB, uint8) from [GitHub Releases](https://github.com/yazinsai/offline-tarteel/releases/tag/v0.1.0):
+
+```bash
+curl -L -o fastconformer_ar_ctc_q8.onnx \
+  https://github.com/yazinsai/offline-tarteel/releases/download/v0.1.0/fastconformer_ar_ctc_q8.onnx
+```
+
+You also need two data files from this repo:
+
+- [`data/vocab.json`](data/vocab.json) -- CTC vocabulary (token ID -> character mapping)
+- [`data/quran.json`](data/quran.json) -- All 6,236 verses (for matching decoded text to surah:ayah)
+
+Or generate the ONNX model yourself from the NeMo checkpoint:
+
+```bash
+pip install nemo_toolkit[asr]
+python -c "
+from nemo.collections.asr.models import EncDecHybridRNNTCTCBPEModel
+import torch, onnx
+from onnxruntime.quantization import quantize_dynamic, QuantType
+
+model = EncDecHybridRNNTCTCBPEModel.from_pretrained('nvidia/stt_ar_fastconformer_hybrid_large_pcd_v1.0')
+model.change_decoding_strategy(decoder_type='ctc')
+model.export('fastconformer_ar_ctc.onnx')
+quantize_dynamic('fastconformer_ar_ctc.onnx', 'fastconformer_ar_ctc_q8.onnx', weight_type=QuantType.QUInt8)
+"
+```
+
+### Web / React (ONNX Runtime Web)
+
+Runs entirely in the browser using WebAssembly. See [`web/frontend/`](web/frontend/) for a complete working example.
+
+```bash
+npm install onnxruntime-web @huggingface/transformers
+```
+
+```typescript
+import * as ort from "onnxruntime-web/wasm";
+
+// 1. Create session
+ort.env.wasm.numThreads = 1;
+ort.env.wasm.simd = true;
+const session = await ort.InferenceSession.create(modelBuffer, {
+  executionProviders: ["wasm"],
+});
+
+// 2. Compute mel spectrogram (80-bin, NeMo-compatible)
+//    See web/frontend/src/worker/mel.ts for the full implementation
+//    Uses @huggingface/transformers mel_filter_bank + spectrogram
+const { features, timeFrames } = computeMelSpectrogram(audioFloat32Array);
+
+// 3. Run inference
+const input = new ort.Tensor("float32", features, [1, 80, timeFrames]);
+const length = new ort.Tensor("int64", BigInt64Array.from([BigInt(timeFrames)]), [1]);
+const results = await session.run({
+  [session.inputNames[0]]: input,
+  [session.inputNames[1]]: length,
+});
+const logprobs = results[session.outputNames[0]];
+
+// 4. CTC greedy decode (see web/frontend/src/worker/ctc-decode.ts)
+//    argmax per timestep, collapse repeats, remove blanks, join tokens
+
+// 5. Match decoded text against QuranDB (see web/frontend/src/lib/quran-db.ts)
+//    Levenshtein fuzzy match against all 6,236 verses
+```
+
+Key files to reference for a complete implementation:
+- [`web/frontend/src/worker/mel.ts`](web/frontend/src/worker/mel.ts) -- Mel spectrogram (NeMo-compatible)
+- [`web/frontend/src/worker/ctc-decode.ts`](web/frontend/src/worker/ctc-decode.ts) -- CTC greedy decoder
+- [`web/frontend/src/lib/quran-db.ts`](web/frontend/src/lib/quran-db.ts) -- Verse matching with Levenshtein distance
+- [`web/frontend/src/lib/normalizer.ts`](web/frontend/src/lib/normalizer.ts) -- Arabic text normalization
+
+### React Native (ONNX Runtime Mobile)
+
+Use [`onnxruntime-react-native`](https://www.npmjs.com/package/onnxruntime-react-native) which wraps the native ONNX Runtime for iOS/Android.
+
+```bash
+npm install onnxruntime-react-native
+```
+
+```typescript
+import { InferenceSession, Tensor } from "onnxruntime-react-native";
+
+// Bundle the model in your app assets, or download on first launch
+const session = await InferenceSession.create("path/to/fastconformer_ar_ctc_q8.onnx");
+
+// Same inference pattern as the web version:
+// 1. Compute 80-bin mel spectrogram from 16kHz audio
+// 2. Create input tensors: features [1, 80, T] + length [1]
+// 3. session.run() -> CTC logprobs
+// 4. Greedy decode + QuranDB match
+```
+
+The mel spectrogram, CTC decoder, and QuranDB matching logic from [`web/frontend/src/`](web/frontend/src/) works directly in React Native -- it's pure TypeScript with no browser-specific APIs.
+
+### Python
+
+**Option A: ONNX Runtime (recommended for production)**
+
+```bash
+pip install onnxruntime numpy soundfile librosa
+```
+
+```python
+import numpy as np
+import onnxruntime as ort
+import json
+import librosa
+
+# Load model + vocab
+session = ort.InferenceSession("fastconformer_ar_ctc_q8.onnx")
+vocab = json.load(open("vocab.json"))
+id_to_char = {int(k): v for k, v in vocab.items()}
+blank_id = max(id_to_char.keys())
+
+# Load audio at 16kHz
+audio, sr = librosa.load("recitation.wav", sr=16000)
+
+# Compute NeMo-compatible mel spectrogram
+audio = audio + 1e-5 * np.random.randn(len(audio))  # dither
+audio = np.append(audio[0], audio[1:] - 0.97 * audio[:-1])  # preemphasis
+mel = librosa.feature.melspectrogram(
+    y=audio, sr=16000, n_fft=512, hop_length=160, win_length=400,
+    n_mels=80, fmax=8000, htk=True, norm="slaney"
+)
+mel = np.log(mel + 1e-5)
+# Per-feature normalization
+mel = (mel - mel.mean(axis=1, keepdims=True)) / (mel.std(axis=1, keepdims=True) + 1e-10)
+
+# Run inference
+features = mel.astype(np.float32)[np.newaxis]  # [1, 80, T]
+length = np.array([mel.shape[1]], dtype=np.int64)
+logprobs = session.run(None, {
+    session.get_inputs()[0].name: features,
+    session.get_inputs()[1].name: length,
+})[0]  # [1, T, vocab_size]
+
+# CTC greedy decode
+ids = logprobs[0].argmax(axis=1)
+prev, tokens = -1, []
+for i in ids:
+    if i != prev and i != blank_id:
+        tokens.append(id_to_char.get(i, ""))
+    prev = i
+transcript = "".join(tokens).replace("\u2581", " ").strip()
+
+print(f"Transcript: {transcript}")
+# Then match against quran.json using Levenshtein distance
+```
+
+**Option B: NeMo (full pipeline, heavier dependencies)**
+
+```bash
+pip install nemo_toolkit[asr]
+```
+
+```python
+from nemo.collections.asr.models import EncDecHybridRNNTCTCBPEModel
+
+model = EncDecHybridRNNTCTCBPEModel.from_pretrained(
+    "nvidia/stt_ar_fastconformer_hybrid_large_pcd_v1.0"
+)
+model.change_decoding_strategy(decoder_type="ctc")
+transcript = model.transcribe(["recitation.wav"])[0]
+# Then match transcript against quran.json
+```
+
+**Option C: Use this repo directly**
+
+```bash
+git clone https://github.com/yazinsai/offline-tarteel.git
+cd offline-tarteel
+pip install -e ".[nemo]"
+```
+
+```python
+from experiments.nvidia_fastconformer.run import predict
+
+result = predict("recitation.wav")
+# {"surah": 1, "ayah": 1, "ayah_end": 3, "score": 0.92, "transcript": "..."}
+```
+
+### Model details
+
+| | Value |
+|---|---|
+| **Model** | `nvidia/stt_ar_fastconformer_hybrid_large_pcd_v1.0` |
+| **ONNX file** | `fastconformer_ar_ctc_q8.onnx` (131 MB, uint8 quantized) |
+| **Input** | 80-bin mel spectrogram, 16 kHz, mono |
+| **Output** | CTC logprobs over 1025-token Arabic BPE vocabulary |
+| **Recall** | 87% on 54-sample benchmark (user recordings, professional, crowdsourced) |
+| **Latency** | 0.33s on Apple Silicon, ~0.5-1s in browser WASM |
+| **License** | [CC-BY-4.0](https://huggingface.co/nvidia/stt_ar_fastconformer_hybrid_large_pcd_v1.0) (NVIDIA model) |
+
+---
+
 ## Goal
 
 Ship a model that runs on-device (phone or laptop) with **95%+ recall**, **sub-second latency**, and **under 200 MB** on disk. The current best approach (`nvidia-fastconformer`) reaches **87% recall** at **115 MB** and **0.33s** latency, but still misses the 95% recall bar. Everything in this repo exists to close that final gap.
