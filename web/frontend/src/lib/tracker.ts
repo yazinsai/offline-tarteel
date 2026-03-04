@@ -198,7 +198,8 @@ export class RecitationTracker {
         this._exitTracking(
           `stale (${this.staleCycles} cycles, no progress)`,
         );
-        this.newAudioCount = 0;
+        // Force immediate re-discovery on next feed() instead of waiting 2s
+        this.newAudioCount = TRIGGER_SAMPLES;
         return messages;
       }
     } else {
@@ -313,6 +314,51 @@ export class RecitationTracker {
 
     if (match && match.score >= effectiveThreshold) {
       const ref: [number, number] = [match.surah, match.ayah];
+
+      // Ambiguity guard: when top candidates share a long prefix and the
+      // transcription hasn't clearly gone beyond it, wait for more text
+      // instead of committing to a potentially wrong verse.
+      const runnersUp: Record<string, any>[] = match.runners_up ?? [];
+      if (runnersUp.length >= 2) {
+        const matchVerse = this.db.getVerse(match.surah, match.ayah);
+        // Find a runner-up from a different verse
+        let altRunner: Record<string, any> | null = null;
+        for (const ru of runnersUp) {
+          if (ru.surah !== match.surah || ru.ayah !== match.ayah) {
+            altRunner = ru;
+            break;
+          }
+        }
+        if (altRunner && altRunner.score >= runnersUp[0].score * 0.85) {
+          const altVerse = this.db.getVerse(altRunner.surah, altRunner.ayah);
+          if (matchVerse && altVerse) {
+            const w1 = matchVerse.text_clean.split(" ");
+            const w2 = altVerse.text_clean.split(" ");
+            let sharedPrefix = 0;
+            for (
+              let i = 0;
+              i < Math.min(w1.length, w2.length);
+              i++
+            ) {
+              if (w1[i] === w2[i]) sharedPrefix++;
+              else break;
+            }
+            if (sharedPrefix >= 5) {
+              const textWords = text.split(" ").length;
+              if (textWords <= sharedPrefix + 4) {
+                // Still in the ambiguous zone — show raw transcript, wait
+                messages.push({
+                  type: "raw_transcript",
+                  text,
+                  confidence:
+                    Math.round(match.score * 100) / 100,
+                });
+                return messages;
+              }
+            }
+          }
+        }
+      }
 
       // Dedup: skip if same verse was just sent
       if (
