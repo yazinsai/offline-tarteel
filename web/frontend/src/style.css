@@ -203,28 +203,29 @@ body {
   -webkit-box-decoration-break: clone;
 }
 
-/* Recited verse — already passed */
+/* Recited verse — already passed, slightly dimmed */
 .verse--recited {
-  color: var(--text-light);
+  color: var(--text-muted);
 }
 
-/* Upcoming verse — not yet reached */
+/* Upcoming verse — not yet reached, fully readable */
 .verse--upcoming {
-  color: var(--text-faint);
+  color: var(--text);
 }
 
 /* ── Individual word (within a verse) ── */
 .word {
-  transition: color 0.15s ease, opacity 0.15s ease;
+  transition: color 0.15s ease, font-weight 0.15s ease;
 }
 
-/* Active verse: unspoken words are muted, spoken words are full color */
+/* Active verse: all words full color, spoken words become bold */
 .verse--active .word {
-  color: var(--text-muted);
+  color: var(--text);
 }
 
 .verse--active .word--spoken {
   color: var(--text);
+  font-weight: 700;
 }
 
 /* Recited and upcoming verses: words inherit parent color */
@@ -247,7 +248,7 @@ body {
 }
 
 .verse--upcoming .verse-marker {
-  color: var(--text-faint);
+  color: var(--text-muted);
 }
 
 .verse--recited .verse-marker {
